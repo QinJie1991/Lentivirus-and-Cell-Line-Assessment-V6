@@ -1485,73 +1485,70 @@ class HPADataManager:
             return None
     
     def _get_cell_line_variants(self, cell_line: str) -> List[str]:
-        """生成细胞系名称的各种变体用于匹配"""
-        variants = [cell_line.upper()]
+        """生成细胞系名称的各种变体用于匹配HPA v25.0列名"""
+        variants = []
         base = cell_line.strip().upper()
         
-        # 标准化变体
-        variants.append(base.replace('-', '').replace(' ', '').replace('_', ''))
+        # 1. 添加原始格式
+        variants.append(base)
+        
+        # 2. 添加去空格/去连字符版本（用于匹配清洗后的列名）
+        base_clean = base.replace(' ', '').replace('-', '').replace('_', '')
+        variants.append(base_clean)
+        
+        # 3. 添加其他常见变体
         variants.append(base.replace(' ', '-'))
         variants.append(base.replace('-', ' '))
-        variants.append(base.replace('-', '_'))
         variants.append(base.replace(' ', '_'))
         
-        # 常见别名映射（扩展版）
-        aliases = {
-            'HEK293': ['HEK293', 'HEK-293', '293', 'HEK_293'],
-            'HEK293T': ['HEK293T', 'HEK-293T', '293T', 'HEK_293T'],
-            'HELA': ['HELA', 'HELA', 'CERVICAL'],
-            'A549': ['A549', 'A-549', 'LUNG'],
-            'HEPG2': ['HEPG2', 'HEP-G2', 'HEPATOCARCINOMA', 'HEPATOMA'],
-            'HK2': ['HK2', 'HK-2', 'KIDNEY', 'RENAL', 'PROXIMAL'],
-            'NCIH226': ['NCIH226', 'NCI-H226', 'H226', 'LUNGSQUAMOUS'],
-            'MCF7': ['MCF7', 'MCF-7', 'BREAST'],
-            'U87MG': ['U87MG', 'U-87', 'U87', 'GLIOBLASTOMA', 'GLIOMA'],
-            'SHSY5Y': ['SHSY5Y', 'SH-SY5Y', 'SY5Y', 'NEUROBLASTOMA'],
-            'K562': ['K562', 'K-562', 'LEUKEMIA', 'MYELOGENOUS'],
-            'THP1': ['THP1', 'THP-1', 'MONOCYTIC'],
-            'JURKAT': ['JURKAT', 'TCELL', 'LEUKEMIA'],
-            'RAW2647': ['RAW2647', 'RAW264.7', 'RAW', 'MACROPHAGE'],
-            'NIH3T3': ['NIH3T3', 'NIH-3T3', '3T3', 'FIBROBLAST'],
-            'CHOK1': ['CHOK1', 'CHO-K1', 'CHO', 'HAMSTER'],
-            'MDCK': ['MDCK', 'CANINE', 'KIDNEY'],
-            'VERO': ['VERO', 'MONKEY', 'KIDNEY'],
-            'COS7': ['COS7', 'COS-7', 'MONKEY'],
-            'BHK21': ['BHK21', 'BHK-21', 'HAMSTER'],
-            'PC12': ['PC12', 'PC-12', 'ADRENAL', 'PHEOCHROMOCYTOMA'],
-            'CACO2': ['CACO2', 'CACO-2', 'COLON', 'COLORECTAL'],
-            'HT29': ['HT29', 'HT-29', 'COLON'],
-            'HCT116': ['HCT116', 'HCT-116', 'COLON'],
-            'SW480': ['SW480', 'SW-480', 'COLON'],
-            'DU145': ['DU145', 'DU-145', 'PROSTATE'],
-            'PC3': ['PC3', 'PC-3', 'PROSTATE'],
-            'LNCAP': ['LNCAP', 'LNCAP', 'PROSTATE'],
-            'SAOS2': ['SAOS2', 'SAOS-2', 'OSTEOSARCOMA'],
-            'MG63': ['MG63', 'MG-63', 'OSTEOSARCOMA'],
-            'U2OS': ['U2OS', 'U-2OS', 'OSTEOSARCOMA'],
-            'A431': ['A431', 'A-431', 'EPIDERMAL'],
-            'HACAT': ['HACAT', 'HACAT', 'KERATINOCYTE', 'SKIN'],
-            'BEAS2B': ['BEAS2B', 'BEAS-2B', 'BRONCHIAL', 'EPITHELIAL'],
-            'CALU3': ['CALU3', 'CALU-3', 'LUNG', 'ADENOCARCINOMA'],
-            'H1975': ['H1975', 'H-1975', 'LUNG', 'ADENOCARCINOMA'],
-            'H1299': ['H1299', 'H-1299', 'LUNG', 'CARCINOMA'],
-            'H460': ['H460', 'H-460', 'LUNG', 'LARGECELL'],
-            'H358': ['H358', 'H-358', 'LUNG', 'ADENOCARCINOMA'],
-            'H23': ['H23', 'H-23', 'LUNG', 'ADENOCARCINOMA'],
-            'H520': ['H520', 'H-520', 'LUNG', 'SQUAMOUS'],
-            'H1703': ['H1703', 'H-1703', 'LUNG', 'SQUAMOUS'],
-            'H2170': ['H2170', 'H-2170', 'LUNG', 'SQUAMOUS'],
+        # 4. HPA v25.0 标准名称映射（关键！）
+        # 格式: HPA标准名称(带空格): [常见输入变体列表]
+        hpa_standard_names = {
+            'HEK 293': ['HEK293', 'HEK-293', 'HEK_293', '293', 'HEK 293', 'HEK293T'],
+            'HEK 293T': ['HEK293T', 'HEK-293T', 'HEK_293T', '293T', 'HEK 293T'],
+            'HeLa': ['HELA', 'HELA', 'HELA CELLS', 'CERVICAL'],
+            'A549': ['A549', 'A-549', 'A 549', 'LUNG'],
+            'Hep G2': ['HEPG2', 'HEP-G2', 'HEP G2', 'HEPATOCARCINOMA'],
+            'HCT 116': ['HCT116', 'HCT-116', 'HCT 116', 'COLON'],
+            'MCF7': ['MCF7', 'MCF-7', 'MCF 7', 'BREAST'],
+            'U-2 OS': ['U2OS', 'U-2OS', 'U2 OS', 'OSTEOSARCOMA'],
+            'SH-SY5Y': ['SHSY5Y', 'SH-SY5Y', 'SH SY5Y', 'NEUROBLASTOMA'],
+            'K-562': ['K562', 'K-562', 'K 562', 'LEUKEMIA'],
+            'THP-1': ['THP1', 'THP-1', 'THP 1', 'MONOCYTIC'],
+            'Jurkat': ['JURKAT', 'TCELL', 'LEUKEMIA'],
+            'NCI-H226': ['NCIH226', 'NCI-H226', 'H226', 'LUNGSQUAMOUS'],
+            'HK-2': ['HK2', 'HK-2', 'HK 2', 'RENAL'],
+            'U-87 MG': ['U87MG', 'U-87', 'U87', 'GLIOBLASTOMA'],
         }
         
-        # 检查是否有别名匹配
-        base_clean = base.replace('-', '').replace(' ', '').replace('_', '')
-        for standard, alias_list in aliases.items():
-            if base_clean in [a.replace('-', '').replace(' ', '').replace('_', '') for a in alias_list] or base_clean == standard:
-                for alias in alias_list:
-                    variants.append(alias.upper().replace('-', '').replace(' ', '').replace('_', ''))
+        # 检查输入是否匹配某个标准名称或其变体
+        for standard_name, aliases in hpa_standard_names.items():
+            standard_clean = standard_name.replace(' ', '').replace('-', '').replace('_', '')
+            
+            # 如果输入匹配标准名称（原始或清洗后）
+            if base == standard_name.upper() or base_clean == standard_clean:
+                # 添加标准名称及其所有变体
+                variants.append(standard_name.upper())  # 原始格式（带空格）
+                variants.append(standard_clean)  # 清洗格式
+                for alias in aliases:
+                    variants.append(alias.upper())
+                    variants.append(alias.upper().replace(' ', '').replace('-', '').replace('_', ''))
                 break
+            
+            # 如果输入匹配某个别名
+            for alias in aliases:
+                alias_clean = alias.upper().replace(' ', '').replace('-', '').replace('_', '')
+                if base == alias.upper() or base_clean == alias_clean:
+                    # 添加标准名称及其所有变体
+                    variants.append(standard_name.upper())
+                    variants.append(standard_clean)
+                    for a in aliases:
+                        variants.append(a.upper())
+                        variants.append(a.upper().replace(' ', '').replace('-', '').replace('_', ''))
+                    break
         
-        return list(set(variants))
+        # 5. 去重并返回
+        return list(set(v for v in variants if v))
     
     def _cache_result(self, gene_symbol: str, cell_line: str, data: Dict, ensembl_id: str, rna_numeric: Optional[float] = None):
         """缓存查询结果"""
@@ -2089,6 +2086,25 @@ class APIRateLimiter:
 
 ncbi_limiter = APIRateLimiter(3.0)
 
+# ==================== 重试装饰器（新增）====================
+def retry_on_failure(max_retries=3, delay=1.0):
+    """重试装饰器 - 用于网络请求"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"{func.__name__} 失败 (尝试 {attempt+1}/{max_retries}): {e}")
+                        time.sleep(delay * (attempt + 1))
+                    else:
+                        logger.error(f"{func.__name__} 最终失败: {e}")
+                        raise
+            return None
+        return wrapper
+    return decorator
+
 # ==================== NCBI客户端 ====================
 class NCBIClient:
     BASE_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
@@ -2147,49 +2163,66 @@ class NCBIClient:
         transcripts = _self._fetch_transcripts(gene_id)
         return gene_info, transcripts
     
+    @retry_on_failure(max_retries=3, delay=1.0)
     def _fetch_transcripts(self, gene_id: str) -> List[Dict]:
+        """使用NCBI E-utilities获取转录本（带重试和限流）"""
         try:
+            # 步骤1：搜索nuccore数据库
             search_params = {
                 'db': 'nuccore',
                 'term': f"{gene_id}[GeneID] AND (NM_[Title] OR XM_[Title])",
                 'retmode': 'json',
-                'retmax': 10
+                'retmax': 20,
+                'sort': 'accession'
             }
             result = self._make_request('esearch.fcgi', search_params)
             if not result:
                 return []
-            
             ids = result.get('esearchresult', {}).get('idlist', [])
             if not ids:
                 return []
-            
-            summary_params = {'db': 'nuccore', 'id': ','.join(ids), 'retmode': 'json'}
-            result = self._make_request('esummary.fcgi', summary_params)
-            if not result:
+
+            # 步骤2：获取详细信息
+            summary_params = {
+                'db': 'nuccore',
+                'id': ','.join(ids),
+                'retmode': 'json'
+            }
+            summary_result = self._make_request('esummary.fcgi', summary_params)
+            if not summary_result:
                 return []
-            
-            docs = result.get('result', {})
+
+            docs = summary_result.get('result', {})
             transcripts = []
-            
             for uid in ids:
                 try:
                     doc = docs.get(uid, {})
                     acc = doc.get('accessionversion', '')
-                    length = doc.get('slen', 0)
+                    slen = doc.get('slen', 0)
                     
-                    if (acc.startswith('NM_') or acc.startswith('XM_')) and length > 0:
-                        transcripts.append({
-                            'id': acc,
-                            'length': int(length),
-                            'title': str(doc.get('title', ''))[:200]
-                        })
-                except Exception:
+                    if not acc or not (acc.startswith('NM_') or acc.startswith('XM_')):
+                        continue
+
+                    tx_type = 'NM' if acc.startswith('NM_') else 'XM'
+                    status = 'REVIEWED' if tx_type == 'NM' else 'PREDICTED'
+
+                    transcripts.append({
+                        'id': acc,
+                        'length': int(slen) if slen else 0,
+                        'type': tx_type,
+                        'status': status,
+                        'title': str(doc.get('title', ''))[:100]
+                    })
+                except Exception as e:
+                    logger.warning(f"解析转录本 {uid} 失败: {e}")
                     continue
-            
+
+            # 排序：NM优先，然后按长度降序
+            transcripts.sort(key=lambda x: (0 if x['type'] == 'NM' else 1, -x['length']))
             return transcripts
-            
+
         except Exception as e:
-            logger.error(f"Transcript fetch error: {e}")
+            logger.error(f"获取转录本失败: {e}")
             return []
     
     def search_gene_function_literature(self, gene_name: str, query_type: str) -> List[Dict]:
@@ -2942,104 +2975,23 @@ class TranscriptSelector:
         return results
     
     def _fetch_ncbi_refseq(self, gene_id: str) -> Dict:
+        """使用NCBI E-utilities获取RefSeq转录本（使用改进的NCBI方法）"""
         transcripts = {}
         try:
-            # 第一步：从 nuccore 搜索该基因的 NM/XM 转录本
-            search_params = {
-                'db': 'nuccore',
-                'term': f"{gene_id}[GeneID] AND (NM_[Title] OR XM_[Title])",
-                'retmode': 'json',
-                'retmax': 20
-            }
-            search_result = self.ncbi._make_request('esearch.fcgi', search_params)
-            if not search_result:
-                return {}
-            
-            ids = search_result.get('esearchresult', {}).get('idlist', [])
-            if not ids:
-                return {}
-            
-            # 第二步：批量获取 GenBank 格式（包含 CDS 特征）
-            fetch_params = {
-                'db': 'nuccore',
-                'id': ','.join(ids),
-                'rettype': 'gb',  # GenBank 格式
-                'retmode': 'text'
-            }
-            gb_text = self.ncbi._make_request('efetch.fcgi', fetch_params, retmode='text')
-            if not gb_text:
-                return {}
-            
-            # 第三步：解析 GenBank 文本，提取 CDS
-            current_acc = None
-            cds_regions = []
-            
-            for line in gb_text.split('\n'):
-                # 提取 Accession
-                if line.startswith('ACCESSION'):
-                    parts = line.split()
-                    if len(parts) > 1:
-                        current_acc = parts[1].strip()
-                        if current_acc and not current_acc.startswith(('NM_', 'XM_')):
-                            current_acc = None
-                
-                # 提取 CDS 特征
-                if current_acc and 'CDS' in line and '..' in line:
-                    # 解析位置，如：join(100..500, 600..900) 或 100..500
-                    match = re.search(r'(\d+)\.\.(\d+)', line)
-                    if match:
-                        start = int(match.group(1))
-                        end = int(match.group(2))
-                        cds_regions.append((current_acc, end - start + 1))
-                    
-                    # 处理 join 情况（多个外显子）
-                    elif 'join(' in line:
-                        total_cds = 0
-                        for m in re.finditer(r'(\d+)\.\.(\d+)', line):
-                            start = int(m.group(1))
-                            end = int(m.group(2))
-                            total_cds += (end - start + 1)
-                        if total_cds > 0:
-                            cds_regions.append((current_acc, total_cds))
-            
-            # 合并同一转录本的多个 CDS 记录，取最大
-            for acc, cds_len in cds_regions:
-                if acc in transcripts:
-                    transcripts[acc]['length'] = max(transcripts[acc]['length'], cds_len)
-                else:
-                    transcripts[acc] = {
-                        'source': 'NCBI',
-                        'status': 'REVIEWED' if acc.startswith('NM_') else 'PREDICTED',
-                        'length': cds_len,
-                        'type': 'RefSeq'
-                    }
-            
-            # 第四步：补充全长（用于参考）
-            summary_params = {'db': 'nuccore', 'id': ','.join(ids), 'retmode': 'json'}
-            summary_result = self.ncbi._make_request('esummary.fcgi', summary_params)
-            if summary_result:
-                docs = summary_result.get('result', {})
-                for uid in ids:
-                    try:
-                        doc = docs.get(uid, {})
-                        acc = doc.get('accessionversion', '')
-                        slen = doc.get('slen', 0)
-                        if acc and acc not in transcripts:
-                            transcripts[acc] = {
-                                'source': 'NCBI',
-                                'status': 'REVIEWED' if acc.startswith('NM_') else 'PREDICTED',
-                                'length': 0,  # CDS 未知
-                                'total_length': int(slen) if slen else 0,
-                                'type': 'RefSeq'
-                            }
-                        elif acc in transcripts:
-                            transcripts[acc]['total_length'] = int(slen) if slen else 0
-                    except:
-                        continue
-            
+            # 使用NCBIClient的_fetch_transcripts方法来获取（已带重试）
+            tx_list = self.ncbi._fetch_transcripts(gene_id)
+            for tx in tx_list:
+                tx_id = tx['id']
+                transcripts[tx_id] = {
+                    'source': 'NCBI',
+                    'status': tx['status'],
+                    'length': tx['length'],
+                    'type': tx['type'],
+                    'title': tx.get('title', '')
+                }
+            logger.info(f"NCBI RefSeq获取成功: {len(transcripts)}个转录本")
         except Exception as e:
             logger.error(f"NCBI RefSeq获取失败: {e}")
-        
         return transcripts
     
     def _fetch_ensembl(self, gene_name: str) -> Dict:
@@ -3369,6 +3321,7 @@ class HybridAssessmentEngine:
     
     def assess(self, gene_name: str, organism: str, cell_line: Optional[str],
                experiment_type: str, cell_validation: Optional[Dict] = None) -> Dict:
+        """执行完整的混合策略评估（带全局错误处理）"""
         result = {
             'timestamp': datetime.now().isoformat(),
             'gene': gene_name,
@@ -3378,99 +3331,127 @@ class HybridAssessmentEngine:
             'decision_hierarchy': {},
             'final_recommendation': '',
             'primary_basis': '',
-            'ai_api_configured': bool(self.ai and self.ai.api_key)
+            'ai_api_configured': bool(self.ai and self.ai.api_key),
+            'errors': [],
+            'warnings': [],
+            'status': 'running'
         }
         
-        effective_cell_line = None
-        if cell_line and str(cell_line).strip():
-            effective_cell_line = str(cell_line).strip()
-            if cell_validation and cell_validation.get('suggested_standard'):
-                effective_cell_line = cell_validation['suggested_standard']
-                logger.info(f"使用标准化细胞系名称: {effective_cell_line}")
-        
-        if cell_validation:
-            result['cell_line_metadata'] = cell_validation
-        
-        # 转录本选择
-        with st.spinner("多数据库交叉验证转录本（APPRIS/NCBI/Ensembl，优先NM）..."):
-            selector = TranscriptSelector(self.ncbi, self.email)
+        try:
+            effective_cell_line = None
+            if cell_line and str(cell_line).strip():
+                effective_cell_line = str(cell_line).strip()
+                if cell_validation and cell_validation.get('suggested_standard'):
+                    effective_cell_line = cell_validation['suggested_standard']
+                    logger.info(f"使用标准化细胞系名称: {effective_cell_line}")
             
-            gene_info_basic, _ = self.ncbi.fetch_gene_data(gene_name, organism)
-            if not gene_info_basic:
-                return {'error': f'无法获取基因 {html.escape(gene_name)} 的信息'}
+            if cell_validation:
+                result['cell_line_metadata'] = cell_validation
             
-            gene_id = gene_info_basic.get('id')
-            if not gene_id:
-                return {'error': f'无法获取基因 {gene_name} 的NCBI Gene ID'}
+            # 转录本选择
+            try:
+                with st.spinner("多数据库交叉验证转录本（APPRIS/NCBI/Ensembl，优先NM）..."):
+                    selector = TranscriptSelector(self.ncbi, self.email)
+                    
+                    gene_info_basic, _ = self.ncbi.fetch_gene_data(gene_name, organism)
+                    if not gene_info_basic:
+                        result['errors'].append(f'无法获取基因 {gene_name} 的信息')
+                        result['status'] = 'error'
+                        return result
+                    
+                    gene_id = gene_info_basic.get('id')
+                    if not gene_id:
+                        result['errors'].append(f'无法获取基因 {gene_name} 的NCBI Gene ID')
+                        result['status'] = 'error'
+                        return result
+                    
+                    tx_selection = selector.select_optimal_transcript(
+                        gene_name=gene_name,
+                        gene_id=gene_id,
+                        cell_line=effective_cell_line
+                    )
+                    
+                    if tx_selection.get('needs_confirmation') and tx_selection.get('conflicts'):
+                        st.warning("检测到多个高评分转录本，请选择您需要过表达的特定转录本（已优先选择NM，过滤XM）：")
+                        options = []
+                        for i, tx in enumerate(tx_selection['conflicts'][:3]):
+                            tx_id = tx['id']
+                            length = tx['info'].get('length', 0)
+                            tx_type = "NM（已验证）" if tx_id.startswith('NM_') else "XM（预测）"
+                            reasons = ", ".join(tx['reasons'][:2])
+                            options.append(f"{tx_id} ({length}bp) [{tx_type}] - {reasons}")
+                        
+                        selected = st.radio("选择转录本:", options, key="transcript_select")
+                        
+                        if selected:
+                            selected_tx_id = selected.split()[0]
+                            for tx in tx_selection['all_transcripts']:
+                                if tx['id'] == selected_tx_id:
+                                    tx_selection['selected_transcript'] = tx
+                                    break
+                    
+                    if tx_selection.get('filtered_xm'):
+                        st.caption(f"ℹ️ 已自动过滤 {len(tx_selection['filtered_xm'])} 个XM预测转录本")
+                    
+                    selected_tx = tx_selection.get('selected_transcript', {})
+                    
+                    transcripts = [{
+                        'id': selected_tx.get('id'),
+                        'length': selected_tx.get('info', {}).get('length', 0),
+                        'selection_reason': selected_tx.get('reasons', []),
+                        'confidence': selected_tx.get('score', 0),
+                        'all_candidates': tx_selection.get('all_transcripts', [])
+                    }]
+                    
+                    gene_info = gene_info_basic
+                    
+                    result['transcript_selection'] = tx_selection
+            except Exception as e:
+                logger.error(f"转录本选择失败: {e}")
+                result['errors'].append(f"转录本选择失败: {str(e)}")
+                result['status'] = 'error'
+                return result
             
-            tx_selection = selector.select_optimal_transcript(
-                gene_name=gene_name,
-                gene_id=gene_id,
-                cell_line=effective_cell_line
-            )
-            
-            if tx_selection.get('needs_confirmation') and tx_selection.get('conflicts'):
-                st.warning("检测到多个高评分转录本，请选择您需要过表达的特定转录本（已优先选择NM，过滤XM）：")
-                options = []
-                for i, tx in enumerate(tx_selection['conflicts'][:3]):
-                    tx_id = tx['id']
-                    length = tx['info'].get('length', 0)
-                    tx_type = "NM（已验证）" if tx_id.startswith('NM_') else "XM（预测）" if tx_id.startswith('XM_') else "其他"
-                    reasons = ", ".join(tx['reasons'][:2])
-                    options.append(f"{tx_id} ({length}bp) [{tx_type}] - {reasons}")
-                
-                selected = st.radio("选择转录本:", options, key="transcript_select")
-                
-                if selected:
-                    selected_tx_id = selected.split()[0]
-                    for tx in tx_selection['all_transcripts']:
-                        if tx['id'] == selected_tx_id:
-                            tx_selection['selected_transcript'] = tx
-                            break
-            
-            if tx_selection.get('filtered_xm'):
-                st.caption(f"ℹ️ 已自动过滤 {len(tx_selection['filtered_xm'])} 个XM预测转录本，优先使用NM已验证转录本")
-            
-            selected_tx = tx_selection.get('selected_transcript', {})
-            
-            transcripts = [{
-                'id': selected_tx.get('id'),
-                'length': selected_tx.get('info', {}).get('length', 0),
-                'selection_reason': selected_tx.get('reasons', []),
-                'confidence': selected_tx.get('score', 0),
-                'all_candidates': tx_selection.get('all_transcripts', [])
-            }]
-            
-            gene_info = gene_info_basic
-            
-            result['transcript_selection'] = tx_selection
-        
-        result['gene_info'] = {
-            'id': gene_info.get('id', ''),
-            'name': gene_info.get('name', ''),
-            'description': gene_info.get('description', '')[:200]
-        }
-        
-        # 硬性规则检查
-        with st.spinner("执行混合硬性规则检查（含AI语义分析）..."):
-            hard_passed, hard_checks, evidence_summary = self.hard_rules.check_all(
-                gene_name, transcripts, experiment_type
-            )
-            result['decision_hierarchy']['hard_rules'] = {
-                'passed': hard_passed,
-                'checks': [asdict(c) for c in hard_checks],
-                'evidence_summary': evidence_summary
+            result['gene_info'] = {
+                'id': gene_info.get('id', ''),
+                'name': gene_info.get('name', ''),
+                'description': gene_info.get('description', '')[:200]
             }
             
-            blocking = [c for c in hard_checks if not c.passed and not c.overrideable]
-            result['blocking_evidence'] = [asdict(c) for c in blocking]
+            # 硬性规则检查
+            try:
+                with st.spinner("执行混合硬性规则检查（含AI语义分析）..."):
+                    hard_passed, hard_checks, evidence_summary = self.hard_rules.check_all(
+                        gene_name, transcripts, experiment_type
+                    )
+                    result['decision_hierarchy']['hard_rules'] = {
+                        'passed': hard_passed,
+                        'checks': [asdict(c) for c in hard_checks],
+                        'evidence_summary': evidence_summary
+                    }
+                    
+                    blocking = [c for c in hard_checks if not c.passed and not c.overrideable]
+                    result['blocking_evidence'] = [asdict(c) for c in blocking]
+                    
+                    if blocking:
+                        result['is_blocked'] = True
+                        result['final_recommendation'] = 'BLOCKED'
+                        result['primary_basis'] = '硬性生物学限制'
+                        result['warnings'].append('检测到硬性阻断证据，请查看详细报告')
+                    else:
+                        result['is_blocked'] = False
+            except Exception as e:
+                logger.error(f"硬性规则检查失败: {e}")
+                result['warnings'].append(f"硬性规则检查部分失败: {str(e)}")
             
-            if blocking:
-                result['is_blocked'] = True
-                result['final_recommendation'] = 'BLOCKED'
-                result['primary_basis'] = '硬性生物学限制（核心数据库或文献证据）'
-            else:
-                result['is_blocked'] = False
+            result['status'] = 'success' if not result['errors'] else 'partial'
+            
+        except Exception as e:
+            logger.exception(f"评估过程发生未预期错误: {e}")
+            result['errors'].append(f"系统错误: {str(e)}")
+            result['status'] = 'error'
+        
+        return result
         
         # AI基因功能分析
         if self.ai and self.ai.api_key:
@@ -3914,6 +3895,23 @@ def render_main_panel():
     return organism, gene, final_cell_line, exp_type, analyze
     
 def render_results(result: Dict):
+    """渲染评估结果（带完整错误处理）"""
+    # 首先显示错误和警告
+    if result.get('errors'):
+        st.error("### ❌ 评估过程中发生错误")
+        for error in result['errors']:
+            st.error(f"- {error}")
+    
+    if result.get('warnings'):
+        st.warning("### ⚠️ 警告")
+        for warning in result['warnings']:
+            st.warning(f"- {warning}")
+    
+    # 如果状态是错误，提前返回
+    if result.get('status') == 'error':
+        st.info("💡 建议：请检查输入参数是否正确，或稍后重试。如问题持续，请联系管理员。")
+        return
+    
     if 'error' in result:
         st.error(result['error'])
         return
