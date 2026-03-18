@@ -3337,120 +3337,302 @@ class HybridAssessmentEngine:
             'status': 'running'
         }
         
-        try:
-            effective_cell_line = None
-            if cell_line and str(cell_line).strip():
-                effective_cell_line = str(cell_line).strip()
-                if cell_validation and cell_validation.get('suggested_standard'):
-                    effective_cell_line = cell_validation['suggested_standard']
-                    logger.info(f"使用标准化细胞系名称: {effective_cell_line}")
-            
-            if cell_validation:
-                result['cell_line_metadata'] = cell_validation
-            
-            # 转录本选择
-            try:
-                with st.spinner("多数据库交叉验证转录本（APPRIS/NCBI/Ensembl，优先NM）..."):
-                    selector = TranscriptSelector(self.ncbi, self.email)
-                    
-                    gene_info_basic, _ = self.ncbi.fetch_gene_data(gene_name, organism)
-                    if not gene_info_basic:
-                        result['errors'].append(f'无法获取基因 {gene_name} 的信息')
-                        result['status'] = 'error'
-                        return result
-                    
-                    gene_id = gene_info_basic.get('id')
-                    if not gene_id:
-                        result['errors'].append(f'无法获取基因 {gene_name} 的NCBI Gene ID')
-                        result['status'] = 'error'
-                        return result
-                    
-                    tx_selection = selector.select_optimal_transcript(
-                        gene_name=gene_name,
-                        gene_id=gene_id,
-                        cell_line=effective_cell_line
-                    )
-                    
-                    if tx_selection.get('needs_confirmation') and tx_selection.get('conflicts'):
-                        st.warning("检测到多个高评分转录本，请选择您需要过表达的特定转录本（已优先选择NM，过滤XM）：")
-                        options = []
-                        for i, tx in enumerate(tx_selection['conflicts'][:3]):
-                            tx_id = tx['id']
-                            length = tx['info'].get('length', 0)
-                            tx_type = "NM（已验证）" if tx_id.startswith('NM_') else "XM（预测）"
-                            reasons = ", ".join(tx['reasons'][:2])
-                            options.append(f"{tx_id} ({length}bp) [{tx_type}] - {reasons}")
-                        
-                        selected = st.radio("选择转录本:", options, key="transcript_select")
-                        
-                        if selected:
-                            selected_tx_id = selected.split()[0]
-                            for tx in tx_selection['all_transcripts']:
-                                if tx['id'] == selected_tx_id:
-                                    tx_selection['selected_transcript'] = tx
-                                    break
-                    
-                    if tx_selection.get('filtered_xm'):
-                        st.caption(f"ℹ️ 已自动过滤 {len(tx_selection['filtered_xm'])} 个XM预测转录本")
-                    
-                    selected_tx = tx_selection.get('selected_transcript', {})
-                    
-                    transcripts = [{
-                        'id': selected_tx.get('id'),
-                        'length': selected_tx.get('info', {}).get('length', 0),
-                        'selection_reason': selected_tx.get('reasons', []),
-                        'confidence': selected_tx.get('score', 0),
-                        'all_candidates': tx_selection.get('all_transcripts', [])
-                    }]
-                    
-                    gene_info = gene_info_basic
-                    
-                    result['transcript_selection'] = tx_selection
-            except Exception as e:
-                logger.error(f"转录本选择失败: {e}")
-                result['errors'].append(f"转录本选择失败: {str(e)}")
-                result['status'] = 'error'
-                return result
-            
-            result['gene_info'] = {
-                'id': gene_info.get('id', ''),
-                'name': gene_info.get('name', ''),
-                'description': gene_info.get('description', '')[:200]
-            }
-            
-            # 硬性规则检查
-            try:
-                with st.spinner("执行混合硬性规则检查（含AI语义分析）..."):
-                    hard_passed, hard_checks, evidence_summary = self.hard_rules.check_all(
-                        gene_name, transcripts, experiment_type
-                    )
-                    result['decision_hierarchy']['hard_rules'] = {
-                        'passed': hard_passed,
-                        'checks': [asdict(c) for c in hard_checks],
-                        'evidence_summary': evidence_summary
-                    }
-                    
-                    blocking = [c for c in hard_checks if not c.passed and not c.overrideable]
-                    result['blocking_evidence'] = [asdict(c) for c in blocking]
-                    
-                    if blocking:
-                        result['is_blocked'] = True
-                        result['final_recommendation'] = 'BLOCKED'
-                        result['primary_basis'] = '硬性生物学限制'
-                        result['warnings'].append('检测到硬性阻断证据，请查看详细报告')
-                    else:
-                        result['is_blocked'] = False
-            except Exception as e:
-                logger.error(f"硬性规则检查失败: {e}")
-                result['warnings'].append(f"硬性规则检查部分失败: {str(e)}")
-            
-            result['status'] = 'success' if not result['errors'] else 'partial'
-            
-        except Exception as e:
-            logger.exception(f"评估过程发生未预期错误: {e}")
-            result['errors'].append(f"系统错误: {str(e)}")
-            result['status'] = 'error'
+        effective_cell_line = None
+        if cell_line and str(cell_line).strip():
+            effective_cell_line = str(cell_line).strip()
+            if cell_validation and cell_validation.get('suggested_standard'):
+                effective_cell_line = cell_validation['suggested_standard']
+                logger.info(f"使用标准化细胞系名称: {effective_cell_line}")
         
+        if cell_validation:
+            result['cell_line_metadata'] = cell_validation
+        
+        # 转录本选择
+        try:
+            with st.spinner("多数据库交叉验证转录本（APPRIS/NCBI/Ensembl，优先NM）..."):
+                selector = TranscriptSelector(self.ncbi, self.email)
+                
+                gene_info_basic, _ = self.ncbi.fetch_gene_data(gene_name, organism)
+                if not gene_info_basic:
+                    result['errors'].append(f'无法获取基因 {gene_name} 的信息')
+                    result['status'] = 'error'
+                    return result
+                
+                gene_id = gene_info_basic.get('id')
+                if not gene_id:
+                    result['errors'].append(f'无法获取基因 {gene_name} 的NCBI Gene ID')
+                    result['status'] = 'error'
+                    return result
+                
+                tx_selection = selector.select_optimal_transcript(
+                    gene_name=gene_name,
+                    gene_id=gene_id,
+                    cell_line=effective_cell_line
+                )
+                
+                if tx_selection.get('needs_confirmation') and tx_selection.get('conflicts'):
+                    st.warning("检测到多个高评分转录本，请选择您需要过表达的特定转录本（已优先选择NM，过滤XM）：")
+                    options = []
+                    for i, tx in enumerate(tx_selection['conflicts'][:3]):
+                        tx_id = tx['id']
+                        length = tx['info'].get('length', 0)
+                        tx_type = "NM（已验证）" if tx_id.startswith('NM_') else "XM（预测）"
+                        reasons = ", ".join(tx['reasons'][:2])
+                        options.append(f"{tx_id} ({length}bp) [{tx_type}] - {reasons}")
+                    
+                    selected = st.radio("选择转录本:", options, key="transcript_select")
+                    
+                    if selected:
+                        selected_tx_id = selected.split()[0]
+                        for tx in tx_selection['all_transcripts']:
+                            if tx['id'] == selected_tx_id:
+                                tx_selection['selected_transcript'] = tx
+                                break
+                
+                if tx_selection.get('filtered_xm'):
+                    st.caption(f"ℹ️ 已自动过滤 {len(tx_selection['filtered_xm'])} 个XM预测转录本")
+                
+                selected_tx = tx_selection.get('selected_transcript', {})
+                
+                transcripts = [{
+                    'id': selected_tx.get('id'),
+                    'length': selected_tx.get('info', {}).get('length', 0),
+                    'selection_reason': selected_tx.get('reasons', []),
+                    'confidence': selected_tx.get('score', 0),
+                    'all_candidates': tx_selection.get('all_transcripts', [])
+                }]
+                
+                gene_info = gene_info_basic
+                
+                result['transcript_selection'] = tx_selection
+        except Exception as e:
+            logger.error(f"转录本选择失败: {e}")
+            result['errors'].append(f"转录本选择失败: {str(e)}")
+            result['status'] = 'error'
+            return result
+        
+        result['gene_info'] = {
+            'id': gene_info.get('id', ''),
+            'name': gene_info.get('name', ''),
+            'description': gene_info.get('description', '')[:200]
+        }
+        
+        # 硬性规则检查
+        try:
+            with st.spinner("执行混合硬性规则检查（含AI语义分析）..."):
+                hard_passed, hard_checks, evidence_summary = self.hard_rules.check_all(
+                    gene_name, transcripts, experiment_type
+                )
+                result['decision_hierarchy']['hard_rules'] = {
+                    'passed': hard_passed,
+                    'checks': [asdict(c) for c in hard_checks],
+                    'evidence_summary': evidence_summary
+                }
+                
+                blocking = [c for c in hard_checks if not c.passed and not c.overrideable]
+                result['blocking_evidence'] = [asdict(c) for c in blocking]
+                
+                if blocking:
+                    result['is_blocked'] = True
+                    result['final_recommendation'] = 'BLOCKED'
+                    result['primary_basis'] = '硬性生物学限制'
+                    result['warnings'].append('检测到硬性阻断证据，请查看详细报告')
+                else:
+                    result['is_blocked'] = False
+        except Exception as e:
+            logger.error(f"硬性规则检查失败: {e}")
+            result['warnings'].append(f"硬性规则检查部分失败: {str(e)}")
+            hard_checks = []
+        
+        # AI基因功能分析
+        if self.ai and self.ai.api_key:
+            try:
+                with st.spinner("AI正在分析基因功能及实验模型数据..."):
+                    papers_general = self.ncbi.search_gene_function_literature(gene_name, 'general')
+                    papers_oe = self.ncbi.search_gene_function_literature(gene_name, 'overexpression')
+                    papers_kd = self.ncbi.search_gene_function_literature(gene_name, 'knockdown')
+                    papers_ko = self.ncbi.search_gene_function_literature(gene_name, 'knockout')
+                    
+                    function_analysis = self.ai.analyze_gene_function_comprehensive(
+                        gene_name=gene_name,
+                        gene_description=gene_info.get('description', ''),
+                        papers_oe=papers_oe,
+                        papers_kd=papers_kd,
+                        papers_ko=papers_ko,
+                        papers_general=papers_general
+                    )
+                    
+                    result['gene_function_analysis'] = {
+                        'data': function_analysis,
+                        'literature_counts': {
+                            'general': len(papers_general),
+                            'overexpression': len(papers_oe),
+                            'knockdown': len(papers_kd),
+                            'knockout': len(papers_ko)
+                        },
+                        'source': 'AI基于文献综合分析',
+                        'status': 'success' if not function_analysis.get('error') else 'error'
+                    }
+            except Exception as e:
+                logger.error(f"基因功能分析失败: {e}")
+                result['warnings'].append(f"基因功能分析失败: {str(e)}")
+                result['gene_function_analysis'] = {
+                    'error': str(e),
+                    'status': 'error',
+                    'note': 'AI分析过程出错'
+                }
+        else:
+            result['gene_function_analysis'] = {
+                'error': '未配置AI API',
+                'note': '请在侧边栏配置API Key或在secrets中设置DASHSCOPE_API_KEY',
+                'status': 'no_api'
+            }
+        
+        # HPA数据查询 + 高级分析
+        if organism == 'Homo sapiens' and effective_cell_line:
+            try:
+                with st.spinner("查询HPA表达数据并进行高级分析..."):
+                    hpa_data = self.hpa.get_expression_data(gene_name, effective_cell_line)
+                    if hpa_data:
+                        result['hpa_data'] = hpa_data
+                    else:
+                        result['hpa_data'] = {
+                            'message': f'在HPA数据库中未找到{gene_name}在{effective_cell_line}中的表达数据',
+                            'searched_cell_line': effective_cell_line
+                        }
+                    
+                    comprehensive_analysis = self.comprehensive_hpa_analysis(
+                        gene_name, effective_cell_line
+                    )
+                    result['comprehensive_hpa_analysis'] = comprehensive_analysis
+            except Exception as e:
+                logger.error(f"HPA分析失败: {e}")
+                result['warnings'].append(f"HPA分析失败: {str(e)}")
+                result['hpa_analysis_error'] = str(e)
+        else:
+            result['hpa_data'] = {
+                'message': f'HPA仅支持人类细胞系。当前: {organism}, {effective_cell_line}',
+                'note': 'HPA仅包含人类细胞系数据'
+            }
+        
+        # 细胞系评估
+        if effective_cell_line:
+            try:
+                with st.spinner(f"检索 {effective_cell_line} 的相关参数..."):
+                    cell_params = self.ncbi.search_cell_lentivirus_params(effective_cell_line)
+                    transfection_params = self.ncbi.search_cell_transfection(effective_cell_line)
+                    same_cell_studies = self.ncbi.search_same_cell_gene_studies(gene_name, effective_cell_line)
+                    cell_culture_papers = self.ncbi.search_cell_culture_literature(effective_cell_line)
+                    
+                    culture_difficulty = {'error': '未配置AI API或分析失败', 'note': '请配置API'}
+                    lv_susceptibility = {'error': '未配置AI API或分析失败', 'note': '请配置API'}
+                    
+                    if self.ai and self.ai.api_key:
+                        try:
+                            with st.spinner(f"AI正在分析 {effective_cell_line} 的培养难点..."):
+                                culture_difficulty = self.ai.analyze_cell_culture_difficulty(
+                                    cell_line=effective_cell_line,
+                                    papers=cell_culture_papers if isinstance(cell_culture_papers, list) else []
+                                )
+                        except Exception as e:
+                            logger.error(f"AI培养难点分析失败: {e}")
+                            culture_difficulty = {'error': f'AI分析失败: {str(e)}', 'note': 'API调用失败'}
+                        
+                        try:
+                            lv_susceptibility = self.ai.analyze_lentivirus_susceptibility(
+                                cell_line=effective_cell_line,
+                                papers=cell_params if isinstance(cell_params, list) else []
+                            )
+                        except Exception as e:
+                            logger.error(f"AI易感性分析失败: {e}")
+                            lv_susceptibility = {'error': f'AI分析失败: {str(e)}', 'note': 'API调用失败'}
+                    
+                    result['cell_assessment'] = {
+                        'lentivirus_params': cell_params if cell_params else [],
+                        'transfection_params': transfection_params if transfection_params else [],
+                        'same_cell_gene_studies': same_cell_studies if same_cell_studies else [],
+                        'culture_difficulty': culture_difficulty,
+                        'lentivirus_susceptibility': lv_susceptibility,
+                        'cell_line_searched': effective_cell_line,
+                        'status': 'success' if not culture_difficulty.get('error') else 'partial'
+                    }
+            except Exception as e:
+                logger.error(f"细胞系评估失败: {e}")
+                result['warnings'].append(f"细胞系评估失败: {str(e)}")
+                result['cell_assessment'] = {
+                    'error': str(e),
+                    'cell_line_searched': effective_cell_line,
+                    'status': 'error'
+                }
+        else:
+            result['cell_assessment'] = {
+                'skipped': True,
+                'reason': '未输入有效细胞系名称',
+                'status': 'skipped'
+            }
+        
+        # 序列设计
+        if experiment_type.lower() in ['knockdown', 'knockout']:
+            if self.ai and self.ai.api_key:
+                try:
+                    with st.spinner("AI正在设计序列并提供参考文献..."):
+                        if experiment_type.lower() == 'knockdown':
+                            design_data = self.ai.design_rnai_sequences(
+                                gene_name=gene_name,
+                                gene_id=gene_info.get('id', ''),
+                                gene_description=gene_info.get('description', '')
+                            )
+                            result['sequence_designs'] = {
+                                'type': 'siRNA/shRNA (AI设计)',
+                                'designs': design_data,
+                                'source': 'AI基于最新文献和数据库知识设计',
+                                'status': 'success' if not design_data.get('error') else 'error'
+                            }
+                        else:
+                            design_data = self.ai.design_crispr_sequences(
+                                gene_name=gene_name,
+                                gene_id=gene_info.get('id', ''),
+                                gene_description=gene_info.get('description', '')
+                            )
+                            result['sequence_designs'] = {
+                                'type': 'sgRNA (AI设计)',
+                                'designs': design_data,
+                                'source': 'AI基于最新文献和数据库知识设计',
+                                'status': 'success' if not design_data.get('error') else 'error'
+                            }
+                except Exception as e:
+                    logger.error(f"序列设计失败: {e}")
+                    result['warnings'].append(f"序列设计失败: {str(e)}")
+                    result['sequence_designs'] = {
+                        'type': '序列设计',
+                        'designs': {'error': str(e)},
+                        'source': 'AI设计失败',
+                        'status': 'error'
+                    }
+            else:
+                result['sequence_designs'] = {
+                    'type': '序列设计',
+                    'designs': {'error': '未配置AI API', 'note': '请在侧边栏输入API Key或在Secrets中设置DASHSCOPE_API_KEY'},
+                    'source': 'N/A',
+                    'status': 'no_api'
+                }
+        
+        # 最终推荐
+        try:
+            if not result.get('final_recommendation'):
+                warning_checks = [c for c in hard_checks if not c.passed and c.overrideable]
+                if warning_checks:
+                    result['final_recommendation'] = "警告：检测到潜在风险，建议谨慎操作"
+                    result['primary_basis'] = f"基于{len(warning_checks)}项警告（可人工覆盖）"
+                else:
+                    result['final_recommendation'] = "未检测到明确风险，可进行标准流程"
+                    result['primary_basis'] = "基于核心数据库筛查和文献检索"
+        except Exception as e:
+            logger.error(f"生成最终推荐失败: {e}")
+            result['final_recommendation'] = "评估完成，但生成推荐时出错"
+            result['primary_basis'] = "部分评估数据可用"
+        
+        result['status'] = 'success' if not result['errors'] else 'partial'
         return result
         
         # AI基因功能分析
