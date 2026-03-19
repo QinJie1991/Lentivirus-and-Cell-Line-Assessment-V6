@@ -2222,7 +2222,7 @@ class NCBIClient:
             'summary': summary.get('summary', '')
         }
         
-        transcripts = self._fetch_transcripts(gene_id)
+        transcripts = _self._fetch_transcripts(gene_id)
         return gene_info, transcripts
     
     @retry_on_failure(max_retries=3, delay=1.0)
