@@ -1296,12 +1296,33 @@ class HPADataManager:
             response = requests.get(self.HPA_URL, stream=True, timeout=300)
             response.raise_for_status()
             
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
             with open(zip_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0 and downloaded % (1024*1024) == 0:
+                            progress = (downloaded / total_size) * 100
+                            logger.info(f"HPA下载进度: {progress:.1f}%")
             
+            st.info("正在解压HPA数据...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.local_dir)
+            
+            # 验证文件是否存在
+            if not os.path.exists(self.data_file):
+                # 检查解压后的实际文件名
+                extracted_files = os.listdir(self.local_dir)
+                logger.info(f"解压后的文件: {extracted_files}")
+                # 可能文件名不同
+                for f in extracted_files:
+                    if f.endswith('.tsv') and 'proteinatlas' in f.lower():
+                        self.data_file = os.path.join(self.local_dir, f)
+                        logger.info(f"使用实际文件名: {f}")
+                        break
             
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -1316,7 +1337,7 @@ class HPADataManager:
             st.success("HPA数据下载完成（包含细胞系RNA表达数据）")
             
         except Exception as e:
-            logger.error(f"HPA download error: {e}")
+            logger.error(f"HPA download error: {e}", exc_info=True)
             st.error(f"HPA数据下载失败: {str(e)}")
     
     def _load_gene_mapping(self):
@@ -1383,8 +1404,29 @@ class HPADataManager:
         try:
             import csv
             
+            # 检查文件是否存在
+            if not os.path.exists(self.data_file):
+                st.warning(f"⚠️ HPA数据文件不存在: {self.data_file}")
+                # 尝试查找任何.tsv文件
+                if os.path.exists(self.local_dir):
+                    files = os.listdir(self.local_dir)
+                    tsv_files = [f for f in files if f.endswith('.tsv')]
+                    st.info(f"📁 目录中的文件: {files}")
+                    if tsv_files:
+                        self.data_file = os.path.join(self.local_dir, tsv_files[0])
+                        st.info(f"✅ 找到替代文件: {tsv_files[0]}")
+                    else:
+                        st.error("❌ 未找到任何.tsv文件，请检查数据下载")
+                        return None
+                else:
+                    st.error(f"❌ HPA数据目录不存在: {self.local_dir}")
+                    return None
+            
             ensembl_id = self._gene_symbol_to_ensembl.get(gene_symbol)
             cell_line_variants = self._get_cell_line_variants(cell_line)
+            
+            st.info(f"🔍 查询HPA: 基因={gene_symbol}, 细胞系={cell_line}")
+            st.info(f"📋 尝试的细胞系名称变体: {cell_line_variants[:8]}")
             
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter='\t')
@@ -1433,8 +1475,26 @@ class HPADataManager:
                             break
                 
                 if not rna_col and not protein_col:
-                    logger.warning(f"未找到细胞系 {cell_line} 的列，可用列: {[h for h in headers if 'RNA' in h or 'CELL' in h][:10]}")
-                    return None
+                    # 调试：列出所有RNA相关的列名
+                    rna_headers = [h for h in headers if 'RNA' in h.upper() or 'CELL' in h.upper()]
+                    logger.warning(f"未找到细胞系 {cell_line} 的列。尝试的变体: {cell_line_variants}")
+                    logger.warning(f"可用的RNA/CELL列 (前20个): {rna_headers[:20]}")
+                    
+                    # 尝试更宽松的匹配 - 只要包含细胞系名称的任何部分
+                    for header in headers:
+                        header_clean = header.upper().replace(' ', '').replace('-', '').replace('_', '').replace('[', '').replace(']', '')
+                        for variant in cell_line_variants:
+                            if variant in header_clean:
+                                if 'RNA' in header.upper() and not rna_col:
+                                    rna_col = header
+                                    logger.info(f"宽松匹配到RNA列: {header}")
+                                if 'PROTEIN' in header.upper() and not protein_col:
+                                    protein_col = header
+                                    logger.info(f"宽松匹配到Protein列: {header}")
+                                break
+                    
+                    if not rna_col and not protein_col:
+                        return None
                 
                 # 查找基因数据
                 for row in reader:
@@ -1476,8 +1536,10 @@ class HPADataManager:
                         }
                         
                         self._cache_result(gene_symbol, cell_line, result, row_ensembl, rna_numeric)
+                        logger.info(f"HPA查询成功: {gene_symbol} in {cell_line}, RNA={rna_level}")
                         return result
             
+            logger.warning(f"HPA未找到基因 {gene_symbol} (Ensembl: {ensembl_id}) 在数据文件中")
             return None
             
         except Exception as e:
@@ -2160,7 +2222,7 @@ class NCBIClient:
             'summary': summary.get('summary', '')
         }
         
-        transcripts = _self._fetch_transcripts(gene_id)
+        transcripts = self._fetch_transcripts(gene_id)
         return gene_info, transcripts
     
     @retry_on_failure(max_retries=3, delay=1.0)
@@ -3491,6 +3553,9 @@ class HybridAssessmentEngine:
         # HPA数据查询 + 高级分析
         if organism == 'Homo sapiens' and effective_cell_line:
             try:
+                # 确保HPA数据已下载
+                self.hpa.check_and_download()
+                
                 with st.spinner("查询HPA表达数据并进行高级分析..."):
                     hpa_data = self.hpa.get_expression_data(gene_name, effective_cell_line)
                     if hpa_data:
