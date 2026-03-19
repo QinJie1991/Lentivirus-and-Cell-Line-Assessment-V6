@@ -3567,7 +3567,7 @@ class HybridAssessmentEngine:
                         }
                     
                     comprehensive_analysis = self.comprehensive_hpa_analysis(
-                        gene_name, effective_cell_line
+                        gene_name, effective_cell_line, hpa_data if hpa_data else None
                     )
                     result['comprehensive_hpa_analysis'] = comprehensive_analysis
             except Exception as e:
@@ -3759,7 +3759,7 @@ class HybridAssessmentEngine:
                     
                     # 执行完整的HPA综合分析（新增）
                     comprehensive_analysis = self.comprehensive_hpa_analysis(
-                        gene_name, effective_cell_line
+                        gene_name, effective_cell_line, hpa_data if hpa_data else None
                     )
                     result['comprehensive_hpa_analysis'] = comprehensive_analysis
                     
@@ -3886,17 +3886,17 @@ class HybridAssessmentEngine:
     
     # ==================== 新增HPA分析方法 ====================
     
-    def comprehensive_hpa_analysis(self, gene_name: str, cell_line: str) -> Dict:
+    def comprehensive_hpa_analysis(self, gene_name: str, cell_line: str, cached_hpa_data: Dict = None) -> Dict:
         """执行完整的HPA数据分析"""
         return {
-            'host_suitability': self.analyze_cell_line_suitability(gene_name, cell_line),
+            'host_suitability': self.analyze_cell_line_suitability(gene_name, cell_line, cached_hpa_data),
             'expression_profile': self.hpa.get_cell_line_expression_profile(gene_name, 'all'),
             'reference_genes': self.hpa.get_reference_genes_stability(cell_line),
             'antibody_strategy': self.hpa.get_antibody_validation_strategy(gene_name),
             'rna_protein_analysis': self.hpa.analyze_rna_protein_correlation(gene_name, cell_line)
         }
     
-    def analyze_cell_line_suitability(self, gene_name: str, target_cell_line: str) -> Dict:
+    def analyze_cell_line_suitability(self, gene_name: str, target_cell_line: str, cached_hpa_data: Dict = None) -> Dict:
         """分析特定细胞系作为宿主的适用性"""
         result = {
             'target_cell_line': target_cell_line,
@@ -3907,7 +3907,11 @@ class HybridAssessmentEngine:
             'alternative_cell_lines': []
         }
         
-        hpa_data = self.hpa.get_expression_data(gene_name, target_cell_line)
+        # 使用缓存的HPA数据避免重复查询
+        if cached_hpa_data:
+            hpa_data = cached_hpa_data
+        else:
+            hpa_data = self.hpa.get_expression_data(gene_name, target_cell_line)
         
         if hpa_data and 'Not detected' not in str(hpa_data.get('rna_level', '')):
             rna_str = hpa_data.get('rna_level', '0 nTPM')
