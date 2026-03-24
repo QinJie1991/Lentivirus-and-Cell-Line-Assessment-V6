@@ -1290,7 +1290,7 @@ class HPADataManager:
     def _download_hpa_data(self):
         """下载proteinatlas.tsv（包含所有细胞系RNA数据）"""
         try:
-            st.info("正在下载HPA数据库（proteinatlas.tsv，约200MB，包含细胞系RNA数据），请稍候...")
+            logger.info("正在下载HPA数据库（proteinatlas.tsv，约200MB，包含细胞系RNA数据），请稍候...")
             zip_path = os.path.join(self.local_dir, "proteinatlas.tsv.zip")
             
             response = requests.get(self.HPA_URL, stream=True, timeout=300)
@@ -1308,7 +1308,7 @@ class HPADataManager:
                             progress = (downloaded / total_size) * 100
                             logger.info(f"HPA下载进度: {progress:.1f}%")
             
-            st.info("正在解压HPA数据...")
+            logger.info("正在解压HPA数据...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.local_dir)
             
@@ -1406,27 +1406,28 @@ class HPADataManager:
             
             # 检查文件是否存在
             if not os.path.exists(self.data_file):
-                st.warning(f"⚠️ HPA数据文件不存在: {self.data_file}")
+                logger.warning(f"HPA数据文件不存在: {self.data_file}")
                 # 尝试查找任何.tsv文件
                 if os.path.exists(self.local_dir):
                     files = os.listdir(self.local_dir)
                     tsv_files = [f for f in files if f.endswith('.tsv')]
-                    st.info(f"📁 目录中的文件: {files}")
+                    logger.info(f"目录中的文件: {files}")
                     if tsv_files:
                         self.data_file = os.path.join(self.local_dir, tsv_files[0])
-                        st.info(f"✅ 找到替代文件: {tsv_files[0]}")
+                        logger.info(f"找到替代文件: {tsv_files[0]}")
                     else:
-                        st.error("❌ 未找到任何.tsv文件，请检查数据下载")
+                        logger.error("未找到任何.tsv文件，请检查数据下载")
                         return None
                 else:
-                    st.error(f"❌ HPA数据目录不存在: {self.local_dir}")
+                    logger.error(f"HPA数据目录不存在: {self.local_dir}")
                     return None
             
             ensembl_id = self._gene_symbol_to_ensembl.get(gene_symbol)
             cell_line_variants = self._get_cell_line_variants(cell_line)
             
-            st.info(f"🔍 查询HPA: 基因={gene_symbol}, 细胞系={cell_line}")
-            st.info(f"📋 尝试的细胞系名称变体: {cell_line_variants[:8]}")
+            # 使用logger代替st.info避免重复输出
+            logger.info(f"查询HPA: 基因={gene_symbol}, 细胞系={cell_line}")
+            logger.info(f"尝试的细胞系名称变体: {cell_line_variants[:8]}")
             
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter='\t')
@@ -1646,6 +1647,206 @@ class HPADataManager:
         except Exception as e:
             logger.error(f"Cache write error: {e}")
     
+    # 内参基因按亚细胞定位分类（包含分子量kDa）- 基于用户提供的完整列表
+    REFERENCE_GENES_BY_LOCATION = {
+        'whole_cell': [  # 全细胞/通用
+            {'gene': 'VCL', 'name': 'Vinculin', 'mw': 125, 'note': '全细胞'},
+            {'gene': 'ACTB', 'name': 'Beta-actin', 'mw': 42, 'note': '全细胞'},
+            {'gene': 'GAPDH', 'name': 'GAPDH', 'mw': 35, 'note': '全细胞'},
+            {'gene': 'PPIB', 'name': 'Cyclophilin B', 'mw': 24, 'note': '全细胞'},
+            {'gene': 'CFL1', 'name': 'Cofilin', 'mw': 20, 'note': '全细胞'},
+        ],
+        'membrane': [  # 细胞膜
+            {'gene': 'ATP1A1', 'name': 'Na+/K+ ATPase', 'mw': 110, 'note': '细胞膜'},
+            {'gene': 'TFRC', 'name': 'Transferrin Receptor', 'mw': 75, 'note': '细胞膜'},
+        ],
+        'nucleus': [  # 细胞核
+            {'gene': 'LMNB1', 'name': 'Lamin B1', 'mw': 66, 'note': '细胞核'},
+            {'gene': 'HDAC1', 'name': 'HDAC1', 'mw': 55, 'note': '细胞核'},
+            {'gene': 'YY1', 'name': 'YY1', 'mw': 50, 'note': '细胞核'},
+            {'gene': 'TBP', 'name': 'TBP', 'mw': 35, 'note': '细胞核'},
+            {'gene': 'PCNA', 'name': 'PCNA', 'mw': 30, 'note': '细胞核'},
+            {'gene': 'HIST1H3A', 'name': 'Histone H3', 'mw': 15, 'note': '细胞核'},
+        ],
+        'mitochondria': [  # 线粒体
+            {'gene': 'HSP60', 'name': 'HSP60', 'mw': 60, 'note': '线粒体'},
+            {'gene': 'VDAC1', 'name': 'VDAC1/Porin', 'mw': 30, 'note': '线粒体'},
+            {'gene': 'COX4I1', 'name': 'COX IV', 'mw': 20, 'note': '线粒体'},
+        ],
+        'cytoskeleton': [  # 细胞骨架
+            {'gene': 'TUBA1A', 'name': 'Alpha-tubulin', 'mw': 55, 'note': '细胞骨架'},
+            {'gene': 'TUBB', 'name': 'Beta-tubulin', 'mw': 50, 'note': '细胞骨架'},
+            {'gene': 'ACTB', 'name': 'Beta-actin', 'mw': 40, 'note': '细胞骨架'},
+        ],
+        'er': [  # 内质网
+            {'gene': 'CANX', 'name': 'Calnexin', 'mw': 67, 'note': '内质网'},
+            {'gene': 'PDIA3', 'name': 'ERp57', 'mw': 57, 'note': '内质网'},
+        ],
+        'general': [  # 其他通用
+            {'gene': 'RPLP0', 'name': 'Ribosomal Protein L0', 'mw': 34, 'note': '核糖体'},
+        ]
+    }
+
+    def get_protein_localization(self, gene_symbol: str) -> Dict:
+        """从proteinatlas.tsv获取蛋白亚细胞定位信息"""
+        try:
+            import csv
+            gene_upper = gene_symbol.upper()
+            
+            if not os.path.exists(self.data_file):
+                return {'error': 'HPA数据文件不存在'}
+            
+            self._load_gene_mapping()
+            ensembl_id = self._gene_symbol_to_ensembl.get(gene_upper)
+            
+            with open(self.data_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f, delimiter='\t')
+                headers = reader.fieldnames
+                
+                # 查找定位相关列
+                loc_main_col = None
+                loc_add_col = None
+                go_cc_col = None  # Gene Ontology Cellular Component
+                
+                for h in headers:
+                    h_upper = h.upper()
+                    if 'MAIN' in h_upper and ('LOCATION' in h_upper or 'LOCALI' in h_upper):
+                        loc_main_col = h
+                    elif 'ADDITIONAL' in h_upper and ('LOCATION' in h_upper or 'LOCALI' in h_upper):
+                        loc_add_col = h
+                    elif 'GO' in h_upper and 'CC' in h_upper:
+                        go_cc_col = h
+                
+                for row in reader:
+                    row_gene = row.get('Gene name', '').strip().upper()
+                    row_ensembl = row.get('Gene', '').strip()
+                    
+                    if row_gene == gene_upper or (ensembl_id and row_ensembl == ensembl_id):
+                        main_loc = row.get(loc_main_col, 'Unknown') if loc_main_col else 'Unknown'
+                        add_loc = row.get(loc_add_col, '') if loc_add_col else ''
+                        go_cc = row.get(go_cc_col, '') if go_cc_col else ''
+                        
+                        # 解析定位类型
+                        locations = []
+                        if main_loc and main_loc != 'Unknown':
+                            locations.append(main_loc)
+                        if add_loc:
+                            locations.extend([l.strip() for l in add_loc.split(',')])
+                        
+                        # 判断定位类别
+                        location_types = self._classify_localization(locations, go_cc)
+                        
+                        return {
+                            'gene': gene_symbol,
+                            'main_localization': main_loc,
+                            'additional_localization': add_loc,
+                            'go_cellular_component': go_cc,
+                            'location_types': location_types,
+                            'all_locations': locations
+                        }
+            
+            return {'error': f'未找到基因 {gene_symbol} 的定位信息'}
+            
+        except Exception as e:
+            logger.error(f"获取蛋白定位失败: {e}")
+            return {'error': str(e)}
+    
+    def _classify_localization(self, locations: List[str], go_cc: str) -> List[str]:
+        """将定位分类为膜、胞质、核等"""
+        loc_text = ' '.join(locations).lower() + ' ' + go_cc.lower()
+        types = []
+        
+        if any(x in loc_text for x in ['plasma membrane', 'membrane', 'cell surface', 'extracellular']):
+            types.append('membrane')
+        if any(x in loc_text for x in ['cytoplasm', 'cytosol']):
+            types.append('cytoplasm')
+        if any(x in loc_text for x in ['cytoskeleton', 'actin', 'tubulin', 'microtubule', 'microfilament']):
+            types.append('cytoskeleton')
+        if any(x in loc_text for x in ['nucleus', 'nuclear', 'nucleoli', 'chromosome']):
+            types.append('nucleus')
+        if any(x in loc_text for x in ['mitochondria', 'mitochondrial']):
+            types.append('mitochondria')
+        if any(x in loc_text for x in ['endoplasmic reticulum', 'er membrane']):
+            types.append('er')
+        if any(x in loc_text for x in ['golgi']):
+            types.append('golgi')
+        
+        return types if types else ['whole_cell']
+    
+    def get_reference_genes_for_location(self, location_types: List[str], target_cell_line: str, 
+                                          target_mw: float = None) -> Dict:
+        """根据定位类型和分子量推荐内参基因"""
+        recommendations = {
+            'location_types': location_types,
+            'reference_genes': [],
+            'recommendation': ''
+        }
+        
+        # 收集候选内参（去重但保留多定位信息）
+        candidates_dict = {}
+        for loc_type in location_types:
+            if loc_type in self.REFERENCE_GENES_BY_LOCATION:
+                for ref in self.REFERENCE_GENES_BY_LOCATION[loc_type]:
+                    gene_name = ref['gene']
+                    if gene_name not in candidates_dict:
+                        candidates_dict[gene_name] = {
+                            **ref,
+                            'locations': [loc_type]
+                        }
+                    else:
+                        # 已存在，添加新的定位类型
+                        if loc_type not in candidates_dict[gene_name]['locations']:
+                            candidates_dict[gene_name]['locations'].append(loc_type)
+        
+        candidates = list(candidates_dict.values())
+        
+        # 如果没有特定定位的内参，使用全细胞内参
+        if not candidates:
+            candidates = self.REFERENCE_GENES_BY_LOCATION['whole_cell']
+        
+        # 查询每个内参在指定细胞系中的表达
+        for ref in candidates:
+            data = self.get_expression_data(ref['gene'], target_cell_line)
+            if data and 'Not detected' not in str(data.get('rna_level', '')):
+                rna_str = data.get('rna_level', '0 nTPM')
+                try:
+                    match = re.search(r'([\d.]+)', str(rna_str))
+                    ntpm = float(match.group(1)) if match else 0
+                except:
+                    ntpm = 0
+                
+                mw_diff = None
+                if target_mw and target_mw > 0:
+                    mw_diff = abs(target_mw - ref['mw'])
+                
+                recommendations['reference_genes'].append({
+                    'gene': ref['gene'],
+                    'name': ref['name'],
+                    'mw_kda': ref['mw'],
+                    'location': ', '.join(ref.get('locations', [ref['note']])),
+                    'rna_ntpm': ntpm,
+                    'protein_level': data.get('protein_level', 'N/A'),
+                    'mw_difference': mw_diff,
+                    'recommended': mw_diff and mw_diff > 20  # 分子量差异>20kDa推荐
+                })
+        
+        # 按分子量差异排序（推荐的优先，然后按差异大小）
+        recommendations['reference_genes'].sort(
+            key=lambda x: (0 if x['recommended'] else 1, x['mw_difference'] if x['mw_difference'] else 999)
+        )
+        
+        # 生成推荐文本
+        top_recommended = [r for r in recommendations['reference_genes'] if r['recommended']][:3]
+        if top_recommended:
+            recommendations['recommendation'] = f"推荐内参: {', '.join([r['gene'] + f" ({r['mw_kda']}kDa)" for r in top_recommended])}"
+        elif recommendations['reference_genes']:
+            top3 = recommendations['reference_genes'][:3]
+            recommendations['recommendation'] = f"可用内参: {', '.join([r['gene'] + f" ({r['mw_kda']}kDa)" for r in top3])} (建议根据分子量选择)"
+        else:
+            recommendations['recommendation'] = "未找到该细胞系中稳定的内参基因"
+        
+        return recommendations
+
     def get_cell_line_expression_profile(self, gene_symbol: str, cell_line_category: str = 'all') -> Dict:
         """
         获取基因在多种细胞系中的表达谱（用于宿主细胞系选择）
@@ -3479,253 +3680,86 @@ class HybridAssessmentEngine:
         
         result['status'] = 'success' if not result['errors'] else 'partial'
         return result
-        
-        # AI基因功能分析
-        if self.ai and self.ai.api_key:
-            with st.spinner("AI正在分析基因功能及实验模型数据..."):
-                try:
-                    papers_general = self.ncbi.search_gene_function_literature(gene_name, 'general')
-                    papers_oe = self.ncbi.search_gene_function_literature(gene_name, 'overexpression')
-                    papers_kd = self.ncbi.search_gene_function_literature(gene_name, 'knockdown')
-                    papers_ko = self.ncbi.search_gene_function_literature(gene_name, 'knockout')
-                    
-                    function_analysis = self.ai.analyze_gene_function_comprehensive(
-                        gene_name=gene_name,
-                        gene_description=gene_info.get('description', ''),
-                        papers_oe=papers_oe,
-                        papers_kd=papers_kd,
-                        papers_ko=papers_ko,
-                        papers_general=papers_general
-                    )
-                    
-                    result['gene_function_analysis'] = {
-                        'data': function_analysis,
-                        'literature_counts': {
-                            'general': len(papers_general),
-                            'overexpression': len(papers_oe),
-                            'knockdown': len(papers_kd),
-                            'knockout': len(papers_ko)
-                        },
-                        'source': 'AI基于文献综合分析',
-                        'status': 'success' if not function_analysis.get('error') else 'error'
-                    }
-                except Exception as e:
-                    logger.error(f"基因功能分析失败: {e}")
-                    result['gene_function_analysis'] = {
-                        'error': str(e),
-                        'status': 'error',
-                        'note': 'AI分析过程出错'
-                    }
-        else:
-            result['gene_function_analysis'] = {
-                'error': '未配置AI API',
-                'note': '请在侧边栏配置API Key或在secrets中设置DASHSCOPE_API_KEY',
-                'status': 'no_api'
-            }
-        
-        # HPA数据查询 + 高级分析（完整版）
-        if organism == 'Homo sapiens' and effective_cell_line:
-            with st.spinner("查询HPA表达数据并进行高级分析..."):
-                try:
-                    # 基础表达数据
-                    hpa_data = self.hpa.get_expression_data(gene_name, effective_cell_line)
-                    if hpa_data:
-                        result['hpa_data'] = hpa_data
-                    else:
-                        result['hpa_data'] = {
-                            'message': f'在HPA数据库中未找到{gene_name}在{effective_cell_line}中的表达数据',
-                            'searched_cell_line': effective_cell_line
-                        }
-                    
-                    # 执行完整的HPA综合分析（新增）
-                    comprehensive_analysis = self.comprehensive_hpa_analysis(
-                        gene_name, effective_cell_line, hpa_data if hpa_data else None
-                    )
-                    result['comprehensive_hpa_analysis'] = comprehensive_analysis
-                    
-                except Exception as e:
-                    logger.error(f"HPA分析失败: {e}")
-                    result['hpa_analysis_error'] = str(e)
-        else:
-            result['hpa_data'] = {
-                'message': f'HPA仅支持人类细胞系。当前: {organism}, {effective_cell_line}',
-                'note': 'HPA仅包含人类细胞系数据'
-            }
-        
-        # 细胞系评估
-        if effective_cell_line:
-            with st.spinner(f"检索 {effective_cell_line} 的相关参数..."):
-                try:
-                    cell_params = self.ncbi.search_cell_lentivirus_params(effective_cell_line)
-                    transfection_params = self.ncbi.search_cell_transfection(effective_cell_line)
-                    same_cell_studies = self.ncbi.search_same_cell_gene_studies(gene_name, effective_cell_line)
-                    cell_culture_papers = self.ncbi.search_cell_culture_literature(effective_cell_line)
-                    
-                    culture_difficulty = {'error': '未配置AI API或分析失败', 'note': '请配置API'}
-                    lv_susceptibility = {'error': '未配置AI API或分析失败', 'note': '请配置API'}
-                    
-                    if self.ai and self.ai.api_key:
-                        with st.spinner(f"AI正在分析 {effective_cell_line} 的培养难点..."):
-                            try:
-                                culture_difficulty = self.ai.analyze_cell_culture_difficulty(
-                                    cell_line=effective_cell_line,
-                                    papers=cell_culture_papers if isinstance(cell_culture_papers, list) else []
-                                )
-                            except Exception as e:
-                                logger.error(f"AI培养难点分析失败: {e}")
-                                culture_difficulty = {'error': f'AI分析失败: {str(e)}', 'note': 'API调用失败'}
-                            
-                            try:
-                                lv_susceptibility = self.ai.analyze_lentivirus_susceptibility(
-                                    cell_line=effective_cell_line,
-                                    papers=cell_params if isinstance(cell_params, list) else []
-                                )
-                            except Exception as e:
-                                logger.error(f"AI易感性分析失败: {e}")
-                                lv_susceptibility = {'error': f'AI分析失败: {str(e)}', 'note': 'API调用失败'}
-                    
-                    result['cell_assessment'] = {
-                        'lentivirus_params': cell_params if cell_params else [],
-                        'transfection_params': transfection_params if transfection_params else [],
-                        'same_cell_gene_studies': same_cell_studies if same_cell_studies else [],
-                        'culture_difficulty': culture_difficulty,
-                        'lentivirus_susceptibility': lv_susceptibility,
-                        'cell_line_searched': effective_cell_line,
-                        'status': 'success' if not culture_difficulty.get('error') else 'partial'
-                    }
-                except Exception as e:
-                    logger.error(f"细胞系评估失败: {e}")
-                    result['cell_assessment'] = {
-                        'error': str(e),
-                        'cell_line_searched': effective_cell_line,
-                        'status': 'error'
-                    }
-        else:
-            result['cell_assessment'] = {
-                'skipped': True,
-                'reason': '未输入有效细胞系名称',
-                'status': 'skipped'
-            }
-        
-        # 序列设计
-        if experiment_type.lower() in ['knockdown', 'knockout']:
-            if self.ai and self.ai.api_key:
-                with st.spinner("AI正在设计序列并提供参考文献..."):
-                    try:
-                        if experiment_type.lower() == 'knockdown':
-                            design_data = self.ai.design_rnai_sequences(
-                                gene_name=gene_name,
-                                gene_id=gene_info.get('id', ''),
-                                gene_description=gene_info.get('description', '')
-                            )
-                            result['sequence_designs'] = {
-                                'type': 'siRNA/shRNA (AI设计)',
-                                'designs': design_data,
-                                'source': 'AI基于最新文献和数据库知识设计',
-                                'status': 'success' if not design_data.get('error') else 'error'
-                            }
-                        else:
-                            design_data = self.ai.design_crispr_sequences(
-                                gene_name=gene_name,
-                                gene_id=gene_info.get('id', ''),
-                                gene_description=gene_info.get('description', '')
-                            )
-                            result['sequence_designs'] = {
-                                'type': 'sgRNA (AI设计)',
-                                'designs': design_data,
-                                'source': 'AI基于最新文献和数据库知识设计',
-                                'status': 'success' if not design_data.get('error') else 'error'
-                            }
-                    except Exception as e:
-                        logger.error(f"序列设计失败: {e}")
-                        result['sequence_designs'] = {
-                            'type': '序列设计',
-                            'designs': {'error': str(e)},
-                            'source': 'AI设计失败',
-                            'status': 'error'
-                        }
-            else:
-                result['sequence_designs'] = {
-                    'type': '序列设计',
-                    'designs': {'error': '未配置AI API', 'note': '请在侧边栏输入API Key或在Secrets中设置DASHSCOPE_API_KEY'},
-                    'source': 'N/A',
-                    'status': 'no_api'
-                }
-        
-        # 最终推荐
-        if not result.get('final_recommendation'):
-            warning_checks = [c for c in hard_checks if not c.passed and c.overrideable]
-            if warning_checks:
-                result['final_recommendation'] = "警告：检测到潜在风险，建议谨慎操作"
-                result['primary_basis'] = f"基于{len(warning_checks)}项警告（可人工覆盖）"
-            else:
-                result['final_recommendation'] = "未检测到明确风险，可进行标准流程"
-                result['primary_basis'] = "基于核心数据库筛查和文献检索"
-        
-        return result
     
-    # ==================== 新增HPA分析方法 ====================
+    # ==================== HPA分析方法（简化版）====================
     
     def comprehensive_hpa_analysis(self, gene_name: str, cell_line: str, cached_hpa_data: Dict = None) -> Dict:
-        """执行完整的HPA数据分析"""
-        return {
-            'host_suitability': self.analyze_cell_line_suitability(gene_name, cell_line, cached_hpa_data),
-            'expression_profile': self.hpa.get_cell_line_expression_profile(gene_name, 'all'),
-            'reference_genes': self.hpa.get_reference_genes_stability(cell_line),
-            'antibody_strategy': self.hpa.get_antibody_validation_strategy(gene_name),
-            'rna_protein_analysis': self.hpa.analyze_rna_protein_correlation(gene_name, cell_line)
-        }
-    
-    def analyze_cell_line_suitability(self, gene_name: str, target_cell_line: str, cached_hpa_data: Dict = None) -> Dict:
-        """分析特定细胞系作为宿主的适用性"""
+        """HPA基础数据分析：蛋白定位、表达量、内参推荐"""
         result = {
-            'target_cell_line': target_cell_line,
             'gene': gene_name,
-            'suitability_score': 0,
-            'risk_factors': [],
-            'recommendations': [],
-            'alternative_cell_lines': []
+            'cell_line': cell_line,
+            'protein_localization': {},
+            'gene_expression': {},
+            'reference_genes': {},
+            'antibody_strategy': {}
         }
         
-        # 使用缓存的HPA数据避免重复查询
-        if cached_hpa_data:
-            hpa_data = cached_hpa_data
-        else:
-            hpa_data = self.hpa.get_expression_data(gene_name, target_cell_line)
+        # 1. 获取蛋白定位信息
+        result['protein_localization'] = self.hpa.get_protein_localization(gene_name)
         
-        if hpa_data and 'Not detected' not in str(hpa_data.get('rna_level', '')):
-            rna_str = hpa_data.get('rna_level', '0 nTPM')
-            try:
-                ntpm = float(rna_str.split()[0])
-            except:
-                ntpm = 0
-            
-            result['endogenous_expression'] = {
-                'rna_ntpm': ntpm,
-                'protein_level': hpa_data.get('protein_level', 'N/A')
+        # 2. 获取目的基因在指定细胞系的表达量
+        hpa_data = cached_hpa_data if cached_hpa_data else self.hpa.get_expression_data(gene_name, cell_line)
+        if hpa_data:
+            result['gene_expression'] = {
+                'rna_level': hpa_data.get('rna_level', 'N/A'),
+                'protein_level': hpa_data.get('protein_level', 'N/A'),
+                'reliability': hpa_data.get('reliability', 'N/A'),
+                'ensembl_id': hpa_data.get('ensembl_id', 'N/A')
             }
-            
-            if ntpm > 100:
-                result['suitability_score'] = 20
-                result['risk_factors'].append(f'内源性高表达({ntpm:.1f} nTPM)')
-                result['recommendations'].append('考虑使用敲除背景细胞系或选择低表达细胞系')
-            elif ntpm > 10:
-                result['suitability_score'] = 60
-                result['risk_factors'].append(f'中等内源表达({ntpm:.1f} nTPM)')
-            else:
-                result['suitability_score'] = 90
-                result['recommendations'].append('理想的过表达宿主（低内源背景）')
-        else:
-            result['suitability_score'] = 85
-            result['recommendations'].append('无HPA数据，建议实验验证')
         
-        # 替代细胞系推荐
-        profile = self.hpa.get_cell_line_expression_profile(gene_name, 'common_expression')
-        low_expr = profile.get('recommendations', {}).get('low_expression_cell_lines', [])
-        result['alternative_cell_lines'] = [x for x in low_expr 
-            if target_cell_line.replace('-', '').upper() not in x['cell_line'].replace('-', '').upper()][:3]
+        # 3. 根据蛋白定位推荐内参基因
+        location_types = result['protein_localization'].get('location_types', ['general'])
+        # TODO: 需要获取目的蛋白的分子量来推荐内参，这里暂时用0表示未知
+        target_mw = 0  # 可以从UniProt等数据库获取
+        result['reference_genes'] = self.hpa.get_reference_genes_for_location(
+            location_types, cell_line, target_mw
+        )
+        
+        # 4. 抗体验证策略（WB和流式）
+        result['antibody_strategy'] = self._get_antibody_strategy(gene_name, result['protein_localization'])
         
         return result
+    
+    def _get_antibody_strategy(self, gene_name: str, localization: Dict) -> Dict:
+        """生成抗体验证策略（WB和流式）"""
+        loc_types = localization.get('location_types', [])
+        main_loc = localization.get('main_localization', 'Unknown')
+        
+        # 根据定位推荐验证方法
+        wb_notes = []
+        flow_notes = []
+        
+        if 'membrane' in loc_types:
+            wb_notes.append("膜蛋白，建议提取总蛋白或使用膜蛋白提取试剂盒")
+            wb_notes.append("转膜条件：建议0.45μm PVDF膜，恒流300mA 90min")
+            flow_notes.append("适合流式检测（细胞表面标记）")
+            flow_notes.append("建议活细胞染色或固定后染色")
+        elif 'nucleus' in loc_types:
+            wb_notes.append("核蛋白，需要核蛋白提取或RIPA强裂解液")
+            wb_notes.append("注意区分核质和核膜定位")
+        elif 'cytoplasm' in loc_types:
+            wb_notes.append("胞质蛋白，常规RIPA提取即可")
+            flow_notes.append("需要固定破膜后才能进行流式检测")
+        elif 'mitochondria' in loc_types:
+            wb_notes.append("线粒体蛋白，建议提取线粒体组分")
+            wb_notes.append("注意与核编码蛋白区分")
+        
+        if not flow_notes:
+            flow_notes.append("该蛋白定位可能不适合常规流式检测")
+            flow_notes.append("如需流式检测，建议考虑过表达带标签的蛋白")
+        
+        return {
+            'gene': gene_name,
+            'main_localization': main_loc,
+            'wb_antibody': {
+                'recommendations': wb_notes if wb_notes else ["常规WB条件即可"],
+                'notes': f"针对{main_loc}定位的WB建议"
+            },
+            'flow_cytometry': {
+                'recommendations': flow_notes,
+                'notes': f"针对{main_loc}定位的流式建议"
+            }
+        }
 
 # ==================== UI渲染（完整版） ====================
 def render_sidebar():
@@ -3999,16 +4033,13 @@ def render_results(result: Dict):
         </div>
     """, unsafe_allow_html=True)
     
-    # 修改后的标签页列表（包含4个新增HPA分析标签页）
+    # 修改后的标签页列表
     tabs = st.tabs([
         "硬性规则检查", 
         "基因功能分析", 
-        "HPA基础数据", 
-        "宿主细胞系选择",  # 新增
-        "内参基因推荐",    # 新增
-        "抗体验证策略",    # 新增
-        "RNA-Protein分析", # 新增
-        "细胞系评估（培养难点）", 
+        "HPA基础数据",     # 蛋白定位、表达量、内参推荐
+        "抗体验证策略",    # WB和流式抗体
+        "细胞系评估", 
         "序列设计", 
         "转录本选择"
     ])
@@ -4149,235 +4180,125 @@ def render_results(result: Dict):
         else:
             st.info("未获取到基因功能分析数据")
     
+    # ==================== HPA基础数据（合并蛋白定位、表达量、内参推荐）====================
     with tabs[2]:
-        st.markdown("### HPA基础表达量数据")
-        st.caption("数据源: Human Protein Atlas (HPA)")
-        
-        hpa_data = result.get('hpa_data')
-        if hpa_data and isinstance(hpa_data, dict):
-            if 'error' in hpa_data:
-                st.error(f"❌ HPA查询错误: {hpa_data['error']}")
-            
-            if 'rna_level' in hpa_data:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    rna_val = hpa_data.get('rna_level', 'N/A')
-                    st.metric("RNA水平", rna_val)
-                with col2:
-                    prot_val = hpa_data.get('protein_level', 'N/A')
-                    st.metric("蛋白水平", prot_val)
-                with col3:
-                    rel_val = hpa_data.get('reliability', 'N/A')
-                    st.metric("可靠性", rel_val)
-                
-                if hpa_data.get('source') == 'rna_celline.tsv':
-                    st.success("✓ 成功从HPA细胞系RNA数据获取")
-                elif hpa_data.get('source') == 'cache':
-                    st.info("从缓存获取数据")
-                
-                if hpa_data.get('cell_line_matched'):
-                    st.caption(f"匹配细胞系: {hpa_data['cell_line_matched']}")
-            else:
-                st.info(hpa_data.get('message', '数据难以获得'))
-                if '仅当物种为人类' in hpa_data.get('message', ''):
-                    st.caption("提示：请确保选择'人类'物种并输入有效细胞系名称")
-        else:
-            st.info("未获取到HPA数据")
-    
-    # ==================== 新增：宿主细胞系选择（标签页3） ====================
-    with tabs[3]:
-        st.markdown("### 🧫 宿主细胞系选择建议（基于HPA表达谱）")
+        st.markdown("### 🧬 HPA基础数据")
+        st.caption("数据来源: Human Protein Atlas (HPA)")
         
         hpa_analysis = result.get('comprehensive_hpa_analysis', {})
-        host_data = hpa_analysis.get('host_suitability', {})
-        expression_profile = hpa_analysis.get('expression_profile', {})
         
-        if host_data:
-            target_cell = host_data.get('target_cell_line', 'N/A')
-            score = host_data.get('suitability_score', 0)
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("适用性评分", f"{score}/100")
-            with col2:
-                endog_expr = host_data.get('endogenous_expression', {})
-                ntpm = endog_expr.get('rna_ntpm', 'N/A')
-                st.metric("内源表达水平", f"{ntpm} nTPM" if isinstance(ntpm, (int, float)) else ntpm)
-            with col3:
-                risk_count = len(host_data.get('risk_factors', []))
-                st.metric("风险因子", f"{risk_count}个")
-            
-            if host_data.get('risk_factors'):
-                with st.expander("⚠️ 风险评估", expanded=True):
-                    for risk in host_data['risk_factors']:
-                        st.error(f"• {risk}")
-            
-            if host_data.get('recommendations'):
-                with st.expander("💡 优化建议", expanded=True):
-                    for rec in host_data['recommendations']:
-                        st.success(f"• {rec}")
-            
-            alternatives = host_data.get('alternative_cell_lines', [])
-            if alternatives:
-                with st.expander("🔄 推荐替代宿主（低内源表达）"):
-                    st.markdown("以下细胞系内源表达更低，可能更适合作为过表达宿主：")
-                    for alt in alternatives:
-                        st.markdown(f"- **{alt['cell_line']}**: {alt['rna_ntpm']:.1f} nTPM (蛋白: {alt['protein_level']})")
-            
-            if expression_profile.get('expression_data'):
-                with st.expander("📊 多细胞系表达谱对比"):
-                    try:
-                        df_data = []
-                        for data in expression_profile['expression_data'][:20]:
-                            df_data.append({
-                                'Cell Line': data['cell_line'],
-                                'RNA (nTPM)': data['rna_ntpm']
-                            })
-                        df = pd.DataFrame(df_data)
-                        st.bar_chart(df.set_index('Cell Line')['RNA (nTPM)'])
-                        st.caption("常用细胞系中该基因的RNA表达水平（基于HPA）")
-                    except Exception as e:
-                        st.error(f"图表生成失败: {e}")
-        else:
-            st.info("未获取到宿主细胞系分析数据（需要配置HPA数据源）")
-    
-    # ==================== 新增：内参基因推荐（标签页4） ====================
-    with tabs[4]:
-        st.markdown("### 🎯 内参基因（Reference Genes）推荐")
-        
-        ref_genes_data = hpa_analysis.get('reference_genes', {}) if 'hpa_analysis' in locals() else {}
-        
-        if ref_genes_data:
-            cell_line = ref_genes_data.get('cell_line', 'Unknown')
-            st.success(f"针对细胞系 **{cell_line}** 的内参基因分析")
-            
-            high_stable = ref_genes_data.get('high_stability', [])
-            if high_stable:
-                st.subheader("✅ 高稳定性内参（推荐优先使用）")
-                cols = st.columns(min(len(high_stable), 4))
-                for i, gene in enumerate(high_stable[:4]):
-                    with cols[i]:
-                        st.metric(gene['gene'], f"{gene['rna_ntpm']:.1f} nTPM")
-            
-            med_stable = ref_genes_data.get('medium_stability', [])
-            if med_stable:
-                with st.expander("⚠️ 中等稳定性内参（备选）"):
-                    for gene in med_stable:
-                        st.write(f"{gene['gene']}: {gene['rna_ntpm']:.1f} nTPM")
-            
-            not_detected = ref_genes_data.get('not_detected', [])
-            if not_detected:
-                with st.expander("❌ 不推荐使用（表达低或未检测）"):
-                    st.write("以下常用内参在此细胞系中表达不佳，避免使用：")
-                    st.write(", ".join([g['gene'] for g in not_detected]))
-            
-            if ref_genes_data.get('recommendation'):
-                st.info(f"**综合建议**: {ref_genes_data['recommendation']}")
+        if hpa_analysis and isinstance(hpa_analysis, dict):
+            # 1. 蛋白定位信息
+            loc_data = hpa_analysis.get('protein_localization', {})
+            if loc_data and 'error' not in loc_data:
+                st.subheader("📍 蛋白亚细胞定位")
+                main_loc = loc_data.get('main_localization', 'Unknown')
+                st.success(f"**主要定位**: {main_loc}")
+                
+                loc_types = loc_data.get('location_types', [])
+                if loc_types:
+                    st.write("**定位类别**: " + ", ".join(loc_types))
+                
+                add_loc = loc_data.get('additional_localization', '')
+                if add_loc:
+                    st.caption(f"附加定位: {add_loc}")
             
             st.divider()
-            st.caption("""
-            说明：基于HPA数据库中参考基因（GAPDH, ACTB, TUBB等）在该细胞系中的表达水平。
-            高表达（>50 nTPM）且稳定的基因更适合作为Western Blot和qPCR的内参。
-            """)
+            
+            # 2. 目的基因表达量
+            expr_data = hpa_analysis.get('gene_expression', {})
+            if expr_data:
+                st.subheader("📊 目的基因表达量")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("RNA水平", expr_data.get('rna_level', 'N/A'))
+                with col2:
+                    st.metric("蛋白水平", expr_data.get('protein_level', 'N/A'))
+                with col3:
+                    st.metric("可靠性", expr_data.get('reliability', 'N/A'))
+            
+            st.divider()
+            
+            # 3. 内参基因推荐（基于定位和分子量）
+            ref_data = hpa_analysis.get('reference_genes', {})
+            if ref_data and 'error' not in ref_data:
+                st.subheader("🎯 内参基因推荐")
+                
+                loc_types = ref_data.get('location_types', ['general'])
+                st.write(f"**基于定位**: {', '.join(loc_types)}")
+                
+                ref_genes = ref_data.get('reference_genes', [])
+                if ref_genes:
+                    # 分离推荐和非推荐（基于分子量差异）
+                    recommended = [r for r in ref_genes if r.get('recommended')][:3]
+                    others = [r for r in ref_genes if not r.get('recommended')][:5]
+                    
+                    if recommended:
+                        st.markdown("**✅ 推荐内参（分子量差异>20kDa）**")
+                        rec_df = pd.DataFrame([
+                            {
+                                '基因': r['gene'],
+                                '蛋白名称': r['name'],
+                                '分子量(kDa)': r['mw_kda'],
+                                'RNA(nTPM)': f"{r['rna_ntpm']:.1f}",
+                                '定位': r['location']
+                            } for r in recommended
+                        ])
+                        st.table(rec_df)
+                    
+                    if others:
+                        with st.expander("其他可用内参"):
+                            other_df = pd.DataFrame([
+                                {
+                                    '基因': r['gene'],
+                                    '分子量(kDa)': r['mw_kda'],
+                                    'RNA(nTPM)': f"{r['rna_ntpm']:.1f}"
+                                } for r in others
+                            ])
+                            st.table(other_df)
+                    
+                    if ref_data.get('recommendation'):
+                        st.info(f"**建议**: {ref_data['recommendation']}")
+                else:
+                    st.warning("未找到该细胞系中表达稳定的内参基因")
+            else:
+                st.info("未获取到内参基因推荐数据")
         else:
-            st.info("未获取到内参基因分析数据")
+            st.info("未获取到HPA分析数据（请确保选择人类物种并输入有效细胞系）")
     
-    # ==================== 新增：抗体验证策略（标签页5） ====================
-    with tabs[5]:
-        st.markdown("### 🔬 抗体验证策略（Positive/Negative Controls）")
+    # ==================== 抗体验证策略（WB和流式）====================
+    with tabs[3]:
+        st.markdown("### 🔬 抗体验证策略")
         
-        antibody_data = hpa_analysis.get('antibody_strategy', {}) if 'hpa_analysis' in locals() else {}
+        hpa_analysis = result.get('comprehensive_hpa_analysis', {})
+        antibody_data = hpa_analysis.get('antibody_strategy', {}) if hpa_analysis else {}
         
-        if antibody_data:
-            st.markdown(f"**目标基因**: {antibody_data.get('gene', 'N/A')}")
+        if antibody_data and 'error' not in antibody_data:
+            main_loc = antibody_data.get('main_localization', 'Unknown')
+            st.success(f"目标蛋白定位: **{main_loc}**")
             
-            pos_controls = antibody_data.get('positive_control_cell_lines', [])
-            if pos_controls:
-                st.subheader("✅ 阳性对照细胞系（高表达）")
-                st.markdown("这些细胞系中目标蛋白高表达，可用于：")
-                st.markdown("- 确认抗体识别能力")
-                st.markdown("- 设置Western Blot阳性条带位置")
-                st.markdown("- ICC/IF实验的阳性信号参考")
-                
-                try:
-                    pos_df = pd.DataFrame([
-                        {
-                            '细胞系': x['cell_line'],
-                            'RNA (nTPM)': x['rna_ntpm'],
-                            '蛋白水平': x['protein_level']
-                        } for x in pos_controls[:5]
-                    ])
-                    st.table(pos_df)
-                except Exception as e:
-                    st.error(f"表格生成失败: {e}")
+            # WB抗体建议
+            wb_data = antibody_data.get('wb_antibody', {})
+            if wb_data:
+                st.subheader("🧪 Western Blot 抗体验证")
+                st.write(f"**说明**: {wb_data.get('notes', '')}")
+                for rec in wb_data.get('recommendations', []):
+                    st.markdown(f"- {rec}")
             
-            neg_controls = antibody_data.get('negative_control_cell_lines', [])
-            if neg_controls:
-                st.subheader("❌ 阴性对照细胞系（低/无表达）")
-                st.markdown("这些细胞系中目标蛋白低表达或无表达，可用于：")
-                st.markdown("- 排除抗体非特异性结合")
-                st.markdown("- 设置背景/阈值水平")
-                st.markdown("- 验证染色特异性")
-                
-                try:
-                    neg_df = pd.DataFrame([
-                        {
-                            '细胞系': x['cell_line'],
-                            'RNA (nTPM)': x['rna_ntpm'],
-                            '用途': x['use_case']
-                        } for x in neg_controls[:5]
-                    ])
-                    st.table(neg_df)
-                except Exception as e:
-                    st.error(f"表格生成失败: {e}")
+            st.divider()
+            
+            # 流式抗体建议
+            flow_data = antibody_data.get('flow_cytometry', {})
+            if flow_data:
+                st.subheader("🌊 流式细胞术 (Flow Cytometry)")
+                st.write(f"**说明**: {flow_data.get('notes', '')}")
+                for rec in flow_data.get('recommendations', []):
+                    st.markdown(f"- {rec}")
         else:
             st.info("未获取到抗体验证策略数据")
     
-    # ==================== 新增：RNA-Protein相关性（标签页6） ====================
-    with tabs[6]:
-        st.markdown("### 📈 RNA-Protein相关性分析（翻译效率评估）")
-        
-        rp_data = hpa_analysis.get('rna_protein_analysis', {}) if 'hpa_analysis' in locals() else {}
-        
-        if rp_data and isinstance(rp_data, dict) and 'error' not in rp_data:
-            gene = rp_data.get('gene', '')
-            cell_line = rp_data.get('cell_line', '')
-            
-            st.success(f"分析对象: {gene} @ {cell_line}")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("RNA水平 (nTPM)", f"{rp_data.get('rna_ntpm', 0):.1f}")
-            with col2:
-                st.metric("蛋白水平", rp_data.get('protein_category', 'Unknown'))
-            
-            correlation = rp_data.get('correlation', {})
-            status = correlation.get('status', '')
-            
-            if 'discrepancy' in status:
-                st.warning(f"**检测到RNA-蛋白不一致**: {correlation.get('interpretation', '')}")
-            else:
-                st.success(f"**RNA-蛋白一致**: {correlation.get('interpretation', '')}")
-            
-            eff = correlation.get('translation_efficiency', 'unknown')
-            eff_color = {'high': 'green', 'normal': 'blue', 'low': 'red'}.get(eff, 'gray')
-            st.markdown(f"**翻译效率评估**: <span style='color:{eff_color};font-weight:bold;'>{eff.upper()}</span>", 
-                       unsafe_allow_html=True)
-            
-            if correlation.get('notes'):
-                st.caption(f"💡 技术提示: {correlation['notes']}")
-            
-            st.divider()
-            st.markdown("""
-            **解读指南：**
-            - **一致（Consistent）**: RNA和蛋白水平匹配，标准表达策略即可
-            - **高RNA低蛋白**: 可能存在翻译抑制或蛋白快速降解，需优化密码子或添加稳定标签
-            - **低RNA高蛋白**: 可能存在高效翻译机制，注意启动子强度选择
-            """)
-        else:
-            st.info("未获取到RNA-Protein相关性分析数据（需要指定细胞系）")
-    
-    with tabs[7]:
+    # ==================== 细胞系评估 ====================
+    with tabs[4]:
         st.markdown("### 细胞系评估数据")
         cell_data = result.get('cell_assessment')
         if cell_data and isinstance(cell_data, dict):
@@ -4491,7 +4412,8 @@ def render_results(result: Dict):
         else:
             st.info("未获取到细胞系评估数据")
     
-    with tabs[8]:
+    # ==================== 序列设计 ====================
+    with tabs[5]:
         st.markdown("### 序列设计参考")
         seq_data = result.get('sequence_designs')
         if seq_data and isinstance(seq_data, dict):
@@ -4565,7 +4487,8 @@ def render_results(result: Dict):
         else:
             st.info("敲低和敲除实验可查看序列设计建议（需要配置AI API）")
     
-    with tabs[9]:
+    # ==================== 转录本选择 ====================
+    with tabs[6]:
         st.markdown("### 转录本选择详情（多数据库交叉验证）")
         tx_data = result.get('transcript_selection', {})
         if tx_data and isinstance(tx_data, dict):
