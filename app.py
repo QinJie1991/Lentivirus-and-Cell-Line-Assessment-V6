@@ -217,6 +217,249 @@ class HPACellLineAutocompleteService:
         return self.get_exact_match(query) is not None
 
 
+
+# ==================== HPA基因自动补全服务（基于Gene synonym）====================
+class HPAGeneAutocompleteService:
+    """基于HPA proteinatlas.tsv的Gene synonym列的基因自动补全服务"""
+    
+    def __init__(self, hpa_manager=None):
+        self.hpa_manager = hpa_manager
+        self.search_index = {}
+        self.gene_data_cache = {}
+        self._build_search_index()
+    
+    def _build_search_index(self):
+        """从proteinatlas.tsv构建基因搜索索引"""
+        data_file = None
+        
+        if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
+            data_file = self.hpa_manager.data_file
+        else:
+            local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
+            data_file = os.path.join(local_dir, "proteinatlas.tsv")
+        
+        if not data_file or not os.path.exists(data_file):
+            logger.warning("HPA数据文件不存在，基因自动补全将不可用")
+            return
+        
+        try:
+            with open(data_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f, delimiter='\t')
+                for row in reader:
+                    gene_symbol = row.get('Gene name', '').strip()
+                    ensembl_id = row.get('Gene', '').strip()
+                    synonyms_str = row.get('Gene synonym', '').strip()
+                    
+                    if not gene_symbol:
+                        continue
+                    
+                    gene_key = gene_symbol.upper()
+                    
+                    self.gene_data_cache[gene_key] = {
+                        'gene_symbol': gene_symbol,
+                        'ensembl_id': ensembl_id,
+                        'synonyms': synonyms_str,
+                        'chromosome': row.get('Chromosome', ''),
+                        'position': row.get('Position', ''),
+                        'uniprot': row.get('Uniprot', ''),
+                        'description': row.get('Gene description', '')
+                    }
+                    
+                    self._add_to_index(gene_symbol, gene_symbol, ensembl_id, 'primary')
+                    
+                    if synonyms_str:
+                        for syn in synonyms_str.split(','):
+                            syn_clean = syn.strip()
+                            if syn_clean and syn_clean.upper() != gene_symbol.upper():
+                                self._add_to_index(syn_clean, gene_symbol, ensembl_id, 'synonym')
+                    
+        except Exception as e:
+            logger.error(f"构建HPA基因索引失败: {e}")
+    
+    def _add_to_index(self, name, gene_symbol, ensembl_id, name_type):
+        norm = self._normalize(name)
+        if norm and norm not in self.search_index:
+            self.search_index[norm] = {
+                'gene_symbol': gene_symbol,
+                'ensembl_id': ensembl_id,
+                'name_type': name_type,
+                'original_name': name
+            }
+    
+    def _normalize(self, name):
+        if not name:
+            return ""
+        return name.upper().replace('-', '').replace(' ', '').replace('_', '')
+    
+    def get_suggestions(self, query, limit=8):
+        if not query or len(query) < 2:
+            return []
+        
+        query_norm = self._normalize(query)
+        if not query_norm:
+            return []
+        
+        matches = []
+        seen_genes = set()
+        
+        if query_norm in self.search_index:
+            info = self.search_index[query_norm]
+            gene_symbol = info['gene_symbol']
+            if gene_symbol.upper() not in seen_genes:
+                matches.append({
+                    'display_name': gene_symbol,
+                    'gene_symbol': gene_symbol,
+                    'match_type': 'exact',
+                    'matched_name': info['original_name'],
+                    'name_type': info['name_type'],
+                    'score': 100
+                })
+                seen_genes.add(gene_symbol.upper())
+        
+        for norm, info in self.search_index.items():
+            gene_symbol = info['gene_symbol']
+            if gene_symbol.upper() not in seen_genes and norm.startswith(query_norm):
+                matches.append({
+                    'display_name': gene_symbol,
+                    'gene_symbol': gene_symbol,
+                    'match_type': 'prefix',
+                    'matched_name': info['original_name'],
+                    'name_type': info['name_type'],
+                    'score': 80 - len(norm)
+                })
+                seen_genes.add(gene_symbol.upper())
+                if len(seen_genes) >= limit * 2:
+                    break
+        
+        for norm, info in self.search_index.items():
+            gene_symbol = info['gene_symbol']
+            if gene_symbol.upper() not in seen_genes and query_norm in norm:
+                matches.append({
+                    'display_name': gene_symbol,
+                    'gene_symbol': gene_symbol,
+                    'match_type': 'substring',
+                    'matched_name': info['original_name'],
+                    'name_type': info['name_type'],
+                    'score': 50
+                })
+                seen_genes.add(gene_symbol.upper())
+                if len(seen_genes) >= limit * 2:
+                    break
+        
+        if len(query_norm) >= 3:
+            for norm, info in self.search_index.items():
+                gene_symbol = info['gene_symbol']
+                if gene_symbol.upper() not in seen_genes:
+                    sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
+                    if sim > 0.6:
+                        matches.append({
+                            'display_name': gene_symbol,
+                            'gene_symbol': gene_symbol,
+                            'match_type': 'fuzzy',
+                            'matched_name': info['original_name'],
+                            'name_type': info['name_type'],
+                            'score': int(sim * 40)
+                        })
+                        seen_genes.add(gene_symbol.upper())
+                        if len(seen_genes) >= limit * 2:
+                            break
+        
+        matches.sort(key=lambda x: (x['score'], x['display_name']), reverse=True)
+        return matches[:limit]
+    
+    def get_gene_info(self, gene_symbol):
+        return self.gene_data_cache.get(gene_symbol.upper())
+    
+    def is_valid_gene(self, gene_symbol):
+        return gene_symbol.upper() in self.gene_data_cache
+
+
+# ==================== HPA基因详细信息提取服务 ====================
+class HPAGeneDetailService:
+    """从proteinatlas.tsv提取基因详细信息"""
+    
+    def __init__(self, hpa_manager=None):
+        self.hpa_manager = hpa_manager
+        self.data_file = self._get_data_file()
+    
+    def _get_data_file(self):
+        if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
+            return self.hpa_manager.data_file
+        local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
+        return os.path.join(local_dir, "proteinatlas.tsv")
+    
+    def get_gene_details(self, gene_symbol):
+        if not self.data_file or not os.path.exists(self.data_file):
+            return None
+        
+        gene_symbol_upper = gene_symbol.upper().strip()
+        
+        try:
+            with open(self.data_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f, delimiter='\t')
+                for row in reader:
+                    if row.get('Gene name', '').upper().strip() == gene_symbol_upper:
+                        return self._extract_gene_data(row)
+        except Exception as e:
+            logger.error(f"获取基因详情失败: {e}")
+        
+        return None
+    
+    def _extract_gene_data(self, row):
+        ensembl_id = row.get('Gene', '')
+        uniprot_id = row.get('Uniprot', '')
+        chromosome = row.get('Chromosome', '')
+        position = row.get('Position', '')
+        
+        return {
+            'gene_symbol': row.get('Gene name', ''),
+            'ensembl_id': ensembl_id,
+            'ensembl_url': f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={ensembl_id}" if ensembl_id else '',
+            'uniprot_id': uniprot_id,
+            'uniprot_url': f"https://www.uniprot.org/uniprotkb/{uniprot_id}" if uniprot_id else '',
+            'genome_location': f"{chromosome}: {position}" if chromosome and position else '',
+            'chromosome': chromosome,
+            'position': position,
+            'protein_localization': {
+                'subcellular_main': row.get('Subcellular main location', ''),
+                'subcellular_additional': row.get('Subcellular additional location', ''),
+                'secretome_location': row.get('Secretome location', ''),
+                'secretome_function': row.get('Secretome function', '')
+            },
+            'protein_function': {
+                'biological_process': row.get('Biological process', ''),
+                'molecular_function': row.get('Molecular function', ''),
+                'disease_involvement': row.get('Disease involvement', '')
+            },
+            'rna_expression': {
+                'tissue_specificity': row.get('RNA tissue specificity', ''),
+                'tissue_specific_ntpm': row.get('RNA tissue specific nTPM', '')
+            },
+            'antibody': {
+                'name': row.get('Antibody', ''),
+                'hpa_search_url': f"https://www.proteinatlas.org/search/{row.get('Antibody', '')}" if row.get('Antibody') else ''
+            },
+            'rna_distribution': {
+                'tissue': {
+                    'specificity': row.get('RNA tissue specificity', ''),
+                    'specific_ntpm': row.get('RNA tissue specific nTPM', '')
+                },
+                'single_cell': {
+                    'specificity': row.get('RNA single cell type specificity', ''),
+                    'specific_ncpm': row.get('RNA single cell type specific nCPM', '')
+                },
+                'cancer': {
+                    'specificity': row.get('RNA cancer specificity', ''),
+                    'specific_ptpm': row.get('RNA cancer specific pTPM', '')
+                },
+                'blood': {
+                    'specificity': row.get('RNA blood cell specificity', ''),
+                    'specific_ntpm': row.get('RNA blood cell specific nTPM', '')
+                }
+            }
+        }
+
+
 # ==================== 细胞系名称标准化验证模块 ====================
 class CellLineNormalizer:
     """细胞系名称标准化、模糊匹配验证（解决书写不规范问题）"""
@@ -796,19 +1039,33 @@ class AIAnalysisClient:
 
     def design_crispr_sequences(self, gene_name: str, gene_id: str = "",
                                gene_description: str = "") -> Dict:
-        """从PMC全文文献中检索Materials and Methods部分的sgRNA序列"""
+        """从PMC全文文献中检索Materials and Methods部分的sgRNA序列（使用纯requests）"""
         try:
             import re
-            from Bio import Entrez
+            import xml.etree.ElementTree as ET
             
-            # 设置Entrez
+            # 设置NCBI API参数
             email, api_key, error = APIConfig.get_ncbi_credentials()
             if error:
                 return {'error': 'NCBI API未配置', 'sgrnas': [], 'source': 'literature'}
             
-            Entrez.email = email
-            if api_key:
-                Entrez.api_key = api_key
+            base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+            
+            def ncbi_request(endpoint, params):
+                """发送NCBI API请求"""
+                params['tool'] = 'LentivirusAssessment'
+                params['email'] = email
+                if api_key:
+                    params['api_key'] = api_key
+                try:
+                    response = requests.get(f"{base_url}/{endpoint}", params=params, timeout=30)
+                    response.raise_for_status()
+                    if params.get('retmode') == 'json':
+                        return response.json()
+                    return response.text
+                except Exception as e:
+                    logger.error(f"NCBI请求失败: {e}")
+                    return None
             
             # 搜索PMC（PubMed Central）全文数据库
             search_terms = [
@@ -819,33 +1076,44 @@ class AIAnalysisClient:
             
             all_sgrnas = []
             seen_sequences = set()
-            supplementary_only = []  # 只在补充材料中有序列的文献
+            supplementary_only = []
             
             for term in search_terms:
                 try:
-                    # 先在PubMed搜索，获取PMC ID
-                    handle = Entrez.esearch(db='pubmed', term=term, retmax=15, sort='relevance')
-                    record = Entrez.read(handle)
-                    handle.close()
+                    # 搜索PubMed
+                    search_result = ncbi_request('esearch.fcgi', {
+                        'db': 'pubmed',
+                        'term': term,
+                        'retmax': 15,
+                        'sort': 'relevance',
+                        'retmode': 'json'
+                    })
+                    if not search_result:
+                        continue
                     
-                    pmid_list = record.get('IdList', [])
+                    pmid_list = search_result.get('esearchresult', {}).get('idlist', [])
                     if not pmid_list:
                         continue
                     
-                    # 批量获取PMC ID
-                    handle = Entrez.elink(dbfrom='pubmed', db='pmc', id=pmid_list)
-                    link_results = Entrez.read(handle)
-                    handle.close()
+                    # 获取PMC ID
+                    link_result = ncbi_request('elink.fcgi', {
+                        'dbfrom': 'pubmed',
+                        'db': 'pmc',
+                        'id': pmid_list,
+                        'retmode': 'json'
+                    })
+                    if not link_result:
+                        continue
                     
-                    # 提取PMC ID
+                    # 解析PMC ID
                     pmc_ids = []
                     pmid_to_pmc = {}
-                    for linkset in link_results:
-                        pmid = linkset.get('IdList', [''])[0]
-                        for link in linkset.get('LinkSetDb', []):
-                            if link.get('LinkName') == 'pubmed_pmc':
-                                for pmc_link in link.get('Link', []):
-                                    pmc_id = pmc_link.get('Id', '')
+                    for linkset in link_result.get('linksets', []):
+                        pmid = linkset.get('ids', [''])[0]
+                        for link in linkset.get('linksetdbs', []):
+                            if link.get('linkname') == 'pubmed_pmc':
+                                for pmc_link in link.get('links', []):
+                                    pmc_id = str(pmc_link)
                                     if pmc_id:
                                         pmc_ids.append(pmc_id)
                                         pmid_to_pmc[pmid] = pmc_id
@@ -853,39 +1121,43 @@ class AIAnalysisClient:
                     if not pmc_ids:
                         continue
                     
-                    # 获取文献基本信息（标题、年份等）
-                    handle = Entrez.efetch(db='pubmed', id=pmid_list, rettype='medline', retmode='text')
-                    medline_text = handle.read()
-                    handle.close()
+                    # 获取文献基本信息
+                    medline_text = ncbi_request('efetch.fcgi', {
+                        'db': 'pubmed',
+                        'id': pmid_list,
+                        'rettype': 'medline',
+                        'retmode': 'text'
+                    })
                     
                     # 解析PubMed信息
                     pmid_info = {}
-                    for article in medline_text.split('\n\n'):
-                        pmid_match = re.search(r'PMID- (\d+)', article)
-                        if pmid_match:
-                            pmid = pmid_match.group(1)
-                            title_match = re.search(r'TI  - (.+?)(?:\n[A-Z]{2}  -|\Z)', article, re.DOTALL)
-                            year_match = re.search(r'DP  - (\d{4})', article)
-                            pmid_info[pmid] = {
-                                'title': title_match.group(1).replace('\n      ', ' ') if title_match else '',
-                                'year': year_match.group(1) if year_match else ''
-                            }
+                    if medline_text:
+                        for article in medline_text.split('\n\n'):
+                            pmid_match = re.search(r'PMID- (\d+)', article)
+                            if pmid_match:
+                                pmid = pmid_match.group(1)
+                                title_match = re.search(r'TI  - (.+?)(?:\n[A-Z]{2}  -|\Z)', article, re.DOTALL)
+                                year_match = re.search(r'DP  - (\d{4})', article)
+                                pmid_info[pmid] = {
+                                    'title': title_match.group(1).replace('\n      ', ' ') if title_match else '',
+                                    'year': year_match.group(1) if year_match else ''
+                                }
                     
                     # 获取PMC全文
                     for pmid, pmc_id in pmid_to_pmc.items():
                         try:
-                            # 获取PMC全文
-                            handle = Entrez.efetch(db='pmc', id=pmc_id, rettype='xml', retmode='xml')
-                            pmc_xml = handle.read()
-                            handle.close()
-                            
-                            if isinstance(pmc_xml, bytes):
-                                pmc_xml = pmc_xml.decode('utf-8')
+                            pmc_xml = ncbi_request('efetch.fcgi', {
+                                'db': 'pmc',
+                                'id': pmc_id,
+                                'rettype': 'xml',
+                                'retmode': 'xml'
+                            })
+                            if not pmc_xml:
+                                continue
                             
                             info = pmid_info.get(pmid, {'title': '', 'year': ''})
                             
-                            # 查找Materials and Methods部分
-                            # PMC XML中Methods部分通常在<sec sec-type="methods">或<title>Methods</title>附近
+                            # 查找Methods部分（使用正则）
                             methods_patterns = [
                                 r'<sec[^>]*sec-type=["\']methods["\'][^>]*>(.*?)</sec>',
                                 r'<title>\s*Materials?\s+and\s+Methods\s*</title>(.*?)(?:<sec>|<title>|<back>|</body>)',
@@ -900,29 +1172,14 @@ class AIAnalysisClient:
                                     methods_text = ' '.join(matches)
                                     break
                             
-                            # 如果没有找到XML标签，尝试从纯文本中提取
-                            if not methods_text:
-                                # 移除XML标签获取纯文本
-                                text_only = re.sub(r'<[^>]+>', ' ', pmc_xml)
-                                # 查找Methods部分
-                                methods_start = re.search(r'(?:Materials\s+and\s+Methods|Experimental\s+Procedures?|Methods)[^\n]*\n', text_only, re.IGNORECASE)
-                                if methods_start:
-                                    start_pos = methods_start.end()
-                                    # 找到下一个主要部分
-                                    next_section = re.search(r'\n\s*(?:Results|Discussion|Acknowledgments?|References?|Supplementary)\s*\n', text_only[start_pos:], re.IGNORECASE)
-                                    if next_section:
-                                        methods_text = text_only[start_pos:start_pos + next_section.start()]
-                                    else:
-                                        methods_text = text_only[start_pos:start_pos + 5000]
+                            # 清理文本
+                            methods_text = re.sub(r'<[^>]+>', ' ', methods_text)
+                            methods_text = re.sub(r'\s+', ' ', methods_text)
                             
-                            if not methods_text:
+                            if not methods_text.strip():
                                 continue
                             
-                            # 清理文本
-                            methods_text = re.sub(r'<[^>]+>', ' ', methods_text)  # 移除XML标签
-                            methods_text = re.sub(r'\s+', ' ', methods_text)  # 规范化空白
-                            
-                            # 首先检查是否在补充材料中
+                            # 检查是否在补充材料中
                             supplementary_patterns = [
                                 r'(?:see|available|provided|listed|described)\s+(?:in|on)\s+(?:the\s+)?(?:Supplementary|supplemental|supporting|additional)',
                                 r'Supplementary\s+(?:Table|Data|File|Material|Information)',
@@ -930,26 +1187,19 @@ class AIAnalysisClient:
                                 r'Table\s+S\d+',
                             ]
                             
-                            has_supplementary = False
-                            for sup_pattern in supplementary_patterns:
-                                if re.search(sup_pattern, methods_text, re.IGNORECASE):
-                                    has_supplementary = True
-                                    break
+                            has_supplementary = any(
+                                re.search(p, methods_text, re.IGNORECASE) for p in supplementary_patterns
+                            )
                             
-                            # 搜索sgRNA序列模式
+                            # 搜索sgRNA序列
                             sequence_patterns = [
-                                # sgRNA/guide RNA + 冒号/等号 + 序列
                                 r'sgRNA[s]?\s*[:=]\s*["\']?([ACGT]{20})["\']?',
                                 r'guide\s+RNA[s]?\s*[:=]\s*["\']?([ACGT]{20})["\']?',
                                 r'target\s+sequence[s]?\s*[:=]\s*["\']?([ACGT]{20})["\']?',
-                                # 序列在引号中
                                 r'["\']([ACGT]{20})["\'][^ACGT]*(?:sgRNA|guide|target)',
                                 r'(?:sgRNA|guide|target)[^ACGT]*["\']([ACGT]{20})["\']',
-                                # 序列后跟NGG PAM
                                 r'([ACGT]{20})\s+NGG',
-                                # 表格格式：基因名 + 序列
                                 rf'{gene_name}\s+[:\s]\s*([ACGT]{{20}})',
-                                # 编号后的序列
                                 r'(?:sgRNA[_-]?)?\d+[:\s)]+([ACGT]{20})',
                             ]
                             
@@ -958,17 +1208,15 @@ class AIAnalysisClient:
                                 matches = re.findall(pattern, methods_text, re.IGNORECASE)
                                 for seq in matches:
                                     seq_upper = seq.upper()
-                                    
-                                    # 过滤
                                     if seq_upper in seen_sequences:
                                         continue
-                                    if len(set(seq_upper)) < 4:  # 低复杂度
+                                    if len(set(seq_upper)) < 4:
                                         continue
-                                    if seq_upper.startswith('TAATACGACTCACTATA'):  # T7 promoter
+                                    if seq_upper.startswith('TAATACGACTCACTATA'):
                                         continue
-                                    if 'AAAAAAAA' in seq_upper or 'TTTTTTTT' in seq_upper:  # poly-A/T
+                                    if 'AAAAAAAA' in seq_upper or 'TTTTTTTT' in seq_upper:
                                         continue
-                                        
+                                    
                                     seen_sequences.add(seq_upper)
                                     found_in_methods = True
                                     
@@ -990,7 +1238,6 @@ class AIAnalysisClient:
                                         }
                                     })
                             
-                            # 如果没找到序列但提示在补充材料中
                             if not found_in_methods and has_supplementary and 'sgRNA' in methods_text.upper():
                                 supplementary_only.append({
                                     'title': info['title'][:150] + '...' if len(info['title']) > 150 else info['title'],
@@ -1015,9 +1262,9 @@ class AIAnalysisClient:
             
             # 构建返回结果
             result = {
-                'sgrnas': all_sgrnas[:5],  # 最多返回5条
-                'supplementary_only': supplementary_only[:3],  # 补充材料中的文献
-                'patent_metadata': patent_metadata[:5],  # 相关专利元数据
+                'sgrnas': all_sgrnas[:5],
+                'supplementary_only': supplementary_only[:3],
+                'patent_metadata': patent_metadata[:5],
                 'source': 'literature_and_patents',
                 'search_location': 'PMC全文Materials and Methods + 专利权利要求书/详细说明',
                 'lentivirus_vector': {
@@ -1051,7 +1298,7 @@ class AIAnalysisClient:
                 
         except Exception as e:
             import traceback
-            return {'error': str(e), 'sgrnas': [], 'source': 'literature', 'note': f'检索失败: {str(e)}', 'traceback': traceback.format_exc()}
+            return {'error': str(e), 'sgrnas': [], 'source': 'literature', 'note': f'检索失败: {str(e)}', 'traceback': traceback.format_exc()[:500]}
 
     def _search_patents_for_sgrna(self, gene_name: str, seen_sequences: set) -> list:
         """从专利数据库中搜索sgRNA序列，尝试获取权利要求书和详细说明"""
@@ -1059,7 +1306,11 @@ class AIAnalysisClient:
         patent_metadata = []  # 用于存储无法获取全文的专利信息
         
         try:
-            from Bio import Entrez
+            try:
+                from Bio import Entrez
+            except ImportError:
+                return {'sequences': [], 'metadata': []}
+            
             import re
             
             patent_terms = [
@@ -2523,19 +2774,39 @@ class NCBIClient:
     def _fetch_transcripts(self, gene_id: str) -> List[Dict]:
         """使用NCBI E-utilities获取转录本（带重试和限流）"""
         try:
-            # 步骤1：搜索nuccore数据库
-            search_params = {
-                'db': 'nuccore',
-                'term': f"{gene_id}[GeneID] AND (NM_[Title] OR XM_[Title])",
-                'retmode': 'json',
-                'retmax': 20,
-                'sort': 'accession'
-            }
-            result = self._make_request('esearch.fcgi', search_params)
-            if not result:
-                return []
-            ids = result.get('esearchresult', {}).get('idlist', [])
+            # 步骤1：搜索nuccore数据库 - 尝试多种搜索策略
+            ids = []
+            debug_info = []
+            
+            # 策略1：使用Accession限定搜索NM/XM
+            search_terms = [
+                f"{gene_id}[GeneID] AND (NM_[Accession] OR XM_[Accession])",
+                f"{gene_id}[GeneID] AND refseq[Filter]",
+                f"{gene_id}[GeneID] AND (mRNA[Title] OR transcript[Title])",
+            ]
+            
+            for term in search_terms:
+                search_params = {
+                    'db': 'nuccore',
+                    'term': term,
+                    'retmode': 'json',
+                    'retmax': 20,
+                    'sort': 'accession'
+                }
+                result = self._make_request('esearch.fcgi', search_params)
+                if result:
+                    term_ids = result.get('esearchresult', {}).get('idlist', [])
+                    debug_info.append(f"策略 '{term[:40]}...': 找到 {len(term_ids)} 个ID")
+                    if term_ids and not ids:
+                        ids = term_ids
+                        logger.info(f"找到 {len(ids)} 个转录本 (查询: {term[:50]}...)")
+                else:
+                    debug_info.append(f"策略 '{term[:40]}...': 请求失败")
+            
             if not ids:
+                logger.warning(f"基因ID {gene_id} 未找到任何转录本")
+                # 存储调试信息供上层使用
+                self._last_transcript_debug = debug_info
                 return []
 
             # 步骤2：获取详细信息
@@ -3274,11 +3545,23 @@ class TranscriptSelector:
                 ccle_data = self._fetch_ccle_expression(gene_name, cell_line)
                 results['database_coverage']['CCLE'] = len(ccle_data)
 
+            # 调试信息显示
+            with st.expander("🔍 转录本获取调试信息", expanded=False):
+                st.write(f"**基因名称**: {gene_name}")
+                st.write(f"**NCBI Gene ID**: {gene_id}")
+                st.write(f"**NCBI RefSeq**: 找到 {len(ncbi_data)} 个转录本")
+                if ncbi_data:
+                    st.write("NCBI转录本列表:", list(ncbi_data.keys())[:5])
+                st.write(f"**Ensembl**: 找到 {len(ensembl_data)} 个转录本")
+                st.write(f"**APPRIS**: 找到 {len(appris_data)} 个转录本")
+                st.write(f"**CCLE**: 找到 {len(ccle_data)} 个表达记录")
+
             all_transcripts = self._merge_transcript_sources(
                 ncbi_data, ensembl_data, appris_data, ccle_data
             )
 
             if not all_transcripts:
+                st.warning("⚠️ 所有数据库均未返回有效转录本")
                 return {'error': '未找到任何转录本信息', 'fallback': True}
 
             # 过滤XM转录本，优先NM
@@ -3346,8 +3629,14 @@ class TranscriptSelector:
                     'title': tx.get('title', '')
                 }
             logger.info(f"NCBI RefSeq获取成功: {len(transcripts)}个转录本")
+            
+            # 显示调试信息
+            if hasattr(self.ncbi, '_last_transcript_debug') and self.ncbi._last_transcript_debug:
+                st.caption(f"📊 NCBI搜索详情: {' | '.join(self.ncbi._last_transcript_debug)}")
+                
         except Exception as e:
             logger.error(f"NCBI RefSeq获取失败: {e}")
+            st.warning(f"⚠️ NCBI RefSeq获取失败: {e}")
         return transcripts
 
     def _fetch_ensembl(self, gene_name: str) -> Dict:
@@ -3543,14 +3832,17 @@ class GeneAutocompleteService:
             return []
 
 class GeneInputComponent:
-    def __init__(self, gene_service: GeneAutocompleteService):
+    def __init__(self, gene_service: GeneAutocompleteService, hpa_gene_service: HPAGeneAutocompleteService = None, hpa_detail_service: HPAGeneDetailService = None):
         self.gene_service = gene_service
+        self.hpa_gene_service = hpa_gene_service
+        self.hpa_detail_service = hpa_detail_service
 
     def render(self, organism: str, key_prefix: str = "gene") -> Optional[str]:
         input_key = f"{key_prefix}_input"
         selected_key = f"{key_prefix}_selected"
         suggestions_key = f"{key_prefix}_suggestions"
         last_query_key = f"{key_prefix}_last_query"
+        hpa_info_key = f"{key_prefix}_hpa_info"
 
         if input_key not in st.session_state:
             st.session_state[input_key] = ""
@@ -3560,9 +3852,15 @@ class GeneInputComponent:
             st.session_state[suggestions_key] = []
         if last_query_key not in st.session_state:
             st.session_state[last_query_key] = ""
+        if hpa_info_key not in st.session_state:
+            st.session_state[hpa_info_key] = None
+
+        # 判断使用哪种自动补全
+        use_hpa = (organism == "human" and self.hpa_gene_service is not None)
+        input_label = "基因名（HPA自动补全，输入2个字符以上显示建议）" if use_hpa else "基因名（支持自动补全，输入2个字符以上显示建议）"
 
         user_input = st.text_input(
-            "基因名（支持自动补全，输入2个字符以上显示建议）",
+            input_label,
             value=st.session_state[input_key],
             key=f"{key_prefix}_text_widget"
         )
@@ -3572,6 +3870,7 @@ class GeneInputComponent:
             if st.session_state[selected_key] and user_input != st.session_state[selected_key]:
                 st.session_state[selected_key] = ""
                 st.session_state[suggestions_key] = []
+                st.session_state[hpa_info_key] = None
 
             if len(user_input) >= 2:
                 safe_rerun()
@@ -3579,33 +3878,192 @@ class GeneInputComponent:
         if len(user_input) >= 2 and not st.session_state[selected_key]:
             last_query = st.session_state.get(last_query_key, "")
             if user_input != last_query:
-                suggestions = self.gene_service.get_suggestions(user_input, organism)
+                if use_hpa:
+                    # 使用HPA自动补全
+                    hpa_suggestions = self.hpa_gene_service.get_suggestions(user_input, limit=8)
+                    suggestions = []
+                    for sug in hpa_suggestions:
+                        gene_info = self.hpa_gene_service.get_gene_info(sug['gene_symbol'])
+                        suggestions.append({
+                            "symbol": sug['gene_symbol'],
+                            "name": gene_info.get('description', '') if gene_info else '',
+                            "gene_id": gene_info.get('ensembl_id', '') if gene_info else '',
+                            "chromosome": gene_info.get('chromosome', '') if gene_info else '',
+                            "type": "protein-coding",
+                            "source": "HPA",
+                            "match_type": sug.get('match_type', ''),
+                            "matched_name": sug.get('matched_name', '')
+                        })
+                else:
+                    # 使用NCBI自动补全
+                    suggestions = self.gene_service.get_suggestions(user_input, organism)
+                
                 st.session_state[suggestions_key] = suggestions
                 st.session_state[last_query_key] = user_input
                 safe_rerun()
 
         suggestions = st.session_state.get(suggestions_key, [])
         if suggestions and not st.session_state[selected_key]:
+            st.caption(f"💡 匹配到 {len(suggestions)} 个建议：")
             cols = st.columns(min(len(suggestions), 4))
             for i, gene in enumerate(suggestions):
                 with cols[i % 4]:
                     display_text = f"{gene['symbol']}"
-                    if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True):
+                    match_type = gene.get('match_type', '')
+                    matched_name = gene.get('matched_name', '')
+                    
+                    # HPA匹配显示匹配类型
+                    if gene.get('source') == 'HPA' and match_type:
+                        icons = {'exact': '✓', 'prefix': '↳', 'substring': '~', 'fuzzy': '≈'}
+                        icon = icons.get(match_type, '•')
+                        if matched_name and matched_name != gene['symbol']:
+                            display_text = f"{icon} {gene['symbol']} ({matched_name})"
+                        else:
+                            display_text = f"{icon} {gene['symbol']}"
+                    
+                    btn_type = "primary" if match_type == 'exact' else "secondary"
+                    help_text = f"匹配类型: {match_type}" if match_type else ""
+                    
+                    if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True, type=btn_type, help=help_text):
                         st.session_state[selected_key] = gene['symbol']
                         st.session_state[input_key] = gene['symbol']
                         st.session_state[f"{key_prefix}_info"] = gene
+                        
+                        # 如果是HPA基因，获取详细信息
+                        if use_hpa and self.hpa_detail_service:
+                            hpa_details = self.hpa_detail_service.get_gene_details(gene['symbol'])
+                            st.session_state[hpa_info_key] = hpa_details
+                        
                         safe_rerun()
 
-        if st.session_state[selected_key] and f"{key_prefix}_info" in st.session_state:
-            gene_info = st.session_state[f"{key_prefix}_info"]
-            st.success(f"已选择: **{gene_info['symbol']}** | {gene_info.get('name', '')} | {gene_info.get('chromosome', '')}")
-
         if st.session_state[selected_key]:
-            return st.session_state[selected_key]
+            gene_symbol = st.session_state[selected_key]
+            
+            # 如果还没有HPA详情，获取它
+            if use_hpa and self.hpa_detail_service and not st.session_state.get(hpa_info_key):
+                hpa_details = self.hpa_detail_service.get_gene_details(gene_symbol)
+                st.session_state[hpa_info_key] = hpa_details
+            
+            # 显示选择信息
+            if f"{key_prefix}_info" in st.session_state:
+                gene_info = st.session_state[f"{key_prefix}_info"]
+                st.success(f"✓ 已选择: **{gene_info['symbol']}** | {gene_info.get('name', '')} | {gene_info.get('chromosome', '')}")
+            
+            # 显示HPA详细信息面板
+            if use_hpa and st.session_state.get(hpa_info_key):
+                self._render_hpa_gene_info(st.session_state[hpa_info_key])
+            
+            return gene_symbol
         elif user_input:
             return user_input
 
         return None
+    
+    def _render_hpa_gene_info(self, gene_info):
+        """渲染HPA基因详细信息面板"""
+        if not gene_info:
+            return
+        
+        with st.expander("🔬 HPA基因详细信息", expanded=True):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # a. Ensembl ID 链接
+                if gene_info.get('ensembl_id'):
+                    st.markdown(f"**Ensembl ID:** [{gene_info['ensembl_id']}]({gene_info['ensembl_url']})")
+                
+                # b. Uniprot ID 链接
+                if gene_info.get('uniprot_id'):
+                    st.markdown(f"**Uniprot ID:** [{gene_info['uniprot_id']}]({gene_info['uniprot_url']})")
+                
+                # c. 基因组位置（UCSC格式）
+                if gene_info.get('genome_location'):
+                    st.markdown(f"**基因组位置:** `{gene_info['genome_location']}`")
+                    # 添加UCSC链接
+                    ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_gene={gene_info['gene_symbol']}"
+                    st.caption(f"[在UCSC Genome Browser中查看]({ucsc_url})")
+            
+            with col2:
+                # f. 抗体推荐
+                antibody = gene_info.get('antibody', {})
+                if antibody.get('name'):
+                    st.markdown(f"**🧪 推荐抗体:** [{antibody['name']}]({antibody['hpa_search_url']})")
+                
+                # e. RNA表达与定位
+                rna_exp = gene_info.get('rna_expression', {})
+                if rna_exp.get('tissue_specificity'):
+                    st.markdown(f"**📊 RNA组织特异性:** {rna_exp['tissue_specificity']}")
+                    if rna_exp.get('tissue_specific_ntpm'):
+                        st.caption(f"nTPM: {rna_exp['tissue_specific_ntpm']}")
+            
+            st.divider()
+            
+            # d. 蛋白定位与功能
+            st.markdown("**🎯 蛋白定位与功能**")
+            loc = gene_info.get('protein_localization', {})
+            func = gene_info.get('protein_function', {})
+            
+            loc_col1, loc_col2 = st.columns(2)
+            with loc_col1:
+                if loc.get('subcellular_main'):
+                    st.write(f"- **主要亚细胞定位:** {loc['subcellular_main']}")
+                if loc.get('subcellular_additional'):
+                    st.write(f"- **其他定位:** {loc['subcellular_additional']}")
+                if loc.get('secretome_location'):
+                    st.write(f"- **分泌组定位:** {loc['secretome_location']}")
+            
+            with loc_col2:
+                if func.get('biological_process'):
+                    st.write(f"- **生物学过程:** {func['biological_process']}")
+                if func.get('molecular_function'):
+                    st.write(f"- **分子功能:** {func['molecular_function']}")
+                if func.get('disease_involvement'):
+                    st.write(f"- **疾病关联:** {func['disease_involvement']}")
+            
+            st.divider()
+            
+            # g. RNA在不同样本中的表达
+            st.markdown("**📈 RNA表达分布**")
+            dist = gene_info.get('rna_distribution', {})
+            
+            dist_cols = st.columns(4)
+            
+            # 组织
+            tissue = dist.get('tissue', {})
+            with dist_cols[0]:
+                st.markdown("**组织**")
+                if tissue.get('specificity'):
+                    st.write(f"{tissue['specificity']}")
+                    if tissue.get('specific_ntpm'):
+                        st.caption(f"nTPM: {tissue['specific_ntpm']}")
+            
+            # 单细胞
+            sc = dist.get('single_cell', {})
+            with dist_cols[1]:
+                st.markdown("**单细胞**")
+                if sc.get('specificity'):
+                    st.write(f"{sc['specificity']}")
+                    if sc.get('specific_ncpm'):
+                        st.caption(f"nCPM: {sc['specific_ncpm']}")
+            
+            # 肿瘤
+            cancer = dist.get('cancer', {})
+            with dist_cols[2]:
+                st.markdown("**肿瘤**")
+                if cancer.get('specificity'):
+                    st.write(f"{cancer['specificity']}")
+                    if cancer.get('specific_ptpm'):
+                        st.caption(f"pTPM: {cancer['specific_ptpm']}")
+            
+            # 血细胞
+            blood = dist.get('blood', {})
+            with dist_cols[3]:
+                st.markdown("**血细胞**")
+                if blood.get('specificity'):
+                    st.write(f"{blood['specificity']}")
+                    if blood.get('specific_ntpm'):
+                        st.caption(f"nTPM: {blood['specific_ntpm']}")
+
 
 # ==================== 报告导出 ====================
 class ReportExporter:
@@ -4147,8 +4605,19 @@ def render_main_panel():
             }.get(x, x)
         )
 
+        # ===== HPA基因自动补全服务初始化 =====
+        if 'hpa_gene_service' not in st.session_state:
+            # 尝试从现有的HPA管理器获取数据文件路径
+            hpa_manager = st.session_state.get('hpa_manager')
+            st.session_state['hpa_gene_service'] = HPAGeneAutocompleteService(hpa_manager)
+            st.session_state['hpa_gene_detail_service'] = HPAGeneDetailService(hpa_manager)
+        
+        hpa_gene_service = st.session_state.get('hpa_gene_service')
+        hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
+        
         gene_service = GeneAutocompleteService()
-        gene_component = GeneInputComponent(gene_service)
+        # 传递HPA服务给GeneInputComponent（仅human物种会使用）
+        gene_component = GeneInputComponent(gene_service, hpa_gene_service, hpa_detail_service)
         gene = gene_component.render(organism, key_prefix="main_gene")
 
     with col2:
