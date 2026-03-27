@@ -14,6 +14,7 @@ import logging
 import sqlite3
 import os
 import difflib
+import csv
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field, asdict
@@ -229,7 +230,7 @@ class HPAGeneAutocompleteService:
         self._build_search_index()
     
     def _build_search_index(self):
-        """从proteinatlas.tsv构建基因搜索索引"""
+        """从proteinatlas.tsv构建基因搜索索引，如文件不存在则触发下载"""
         data_file = None
         
         if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
@@ -238,9 +239,19 @@ class HPAGeneAutocompleteService:
             local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
             data_file = os.path.join(local_dir, "proteinatlas.tsv")
         
+        # 如果文件不存在，尝试触发下载
         if not data_file or not os.path.exists(data_file):
-            logger.warning("HPA数据文件不存在，基因自动补全将不可用")
-            return
+            logger.warning("HPA数据文件不存在，尝试下载...")
+            if self.hpa_manager and hasattr(self.hpa_manager, 'check_and_download'):
+                try:
+                    self.hpa_manager.check_and_download()
+                except Exception as e:
+                    logger.error(f"自动下载HPA数据失败: {e}")
+            
+            # 再次检查文件是否存在
+            if not os.path.exists(data_file):
+                logger.warning("HPA数据文件下载失败或不存在，基因自动补全将不可用")
+                return
         
         try:
             with open(data_file, 'r', encoding='utf-8') as f:
@@ -389,8 +400,26 @@ class HPAGeneDetailService:
         return os.path.join(local_dir, "proteinatlas.tsv")
     
     def get_gene_details(self, gene_symbol):
-        if not self.data_file or not os.path.exists(self.data_file):
+        """获取基因详细信息，如文件不存在则尝试下载"""
+        if not self.data_file:
             return None
+        
+        # 如果文件不存在，尝试触发下载
+        if not os.path.exists(self.data_file):
+            logger.warning("HPA数据文件不存在，尝试下载...")
+            if self.hpa_manager and hasattr(self.hpa_manager, 'check_and_download'):
+                try:
+                    self.hpa_manager.check_and_download()
+                    # 更新数据文件路径（可能下载后路径有变化）
+                    if hasattr(self.hpa_manager, 'data_file'):
+                        self.data_file = self.hpa_manager.data_file
+                except Exception as e:
+                    logger.error(f"自动下载HPA数据失败: {e}")
+            
+            # 再次检查
+            if not os.path.exists(self.data_file):
+                logger.warning("HPA数据文件不可用")
+                return None
         
         gene_symbol_upper = gene_symbol.upper().strip()
         
@@ -437,7 +466,8 @@ class HPAGeneDetailService:
             },
             'antibody': {
                 'name': row.get('Antibody', ''),
-                'hpa_search_url': f"https://www.proteinatlas.org/search/{row.get('Antibody', '')}" if row.get('Antibody') else ''
+                'hpa_search_url': f"https://www.proteinatlas.org/search/{row.get('Antibody', '').replace(' ', '%20')}" if row.get('Antibody') else '',
+                'hpa_gene_url': f"https://www.proteinatlas.org/{row.get('Gene', '')}" if row.get('Gene') else ''
             },
             'rna_distribution': {
                 'tissue': {
@@ -3960,109 +3990,151 @@ class GeneInputComponent:
         return None
     
     def _render_hpa_gene_info(self, gene_info):
-        """渲染HPA基因详细信息面板"""
+        """渲染HPA基因详细信息面板 - 完整展示所有提取信息"""
         if not gene_info:
             return
         
         with st.expander("🔬 HPA基因详细信息", expanded=True):
-            col1, col2 = st.columns(2)
+            # ===== 第一行：基础信息 =====
+            st.markdown("#### 📋 基础信息")
+            col1, col2, col3 = st.columns(3)
             
             with col1:
                 # a. Ensembl ID 链接
                 if gene_info.get('ensembl_id'):
-                    st.markdown(f"**Ensembl ID:** [{gene_info['ensembl_id']}]({gene_info['ensembl_url']})")
-                
-                # b. Uniprot ID 链接
-                if gene_info.get('uniprot_id'):
-                    st.markdown(f"**Uniprot ID:** [{gene_info['uniprot_id']}]({gene_info['uniprot_url']})")
-                
-                # c. 基因组位置（UCSC格式）
-                if gene_info.get('genome_location'):
-                    st.markdown(f"**基因组位置:** `{gene_info['genome_location']}`")
-                    # 添加UCSC链接
-                    ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_gene={gene_info['gene_symbol']}"
-                    st.caption(f"[在UCSC Genome Browser中查看]({ucsc_url})")
+                    st.markdown(f"**Ensembl ID:**  ")
+                    st.markdown(f"[{gene_info['ensembl_id']}]({gene_info['ensembl_url']})")
+                else:
+                    st.markdown("**Ensembl ID:** -")
             
             with col2:
-                # f. 抗体推荐
-                antibody = gene_info.get('antibody', {})
-                if antibody.get('name'):
-                    st.markdown(f"**🧪 推荐抗体:** [{antibody['name']}]({antibody['hpa_search_url']})")
-                
-                # e. RNA表达与定位
-                rna_exp = gene_info.get('rna_expression', {})
-                if rna_exp.get('tissue_specificity'):
-                    st.markdown(f"**📊 RNA组织特异性:** {rna_exp['tissue_specificity']}")
-                    if rna_exp.get('tissue_specific_ntpm'):
-                        st.caption(f"nTPM: {rna_exp['tissue_specific_ntpm']}")
+                # b. Uniprot ID 链接
+                if gene_info.get('uniprot_id'):
+                    st.markdown(f"**Uniprot ID:**  ")
+                    st.markdown(f"[{gene_info['uniprot_id']}]({gene_info['uniprot_url']})")
+                else:
+                    st.markdown("**Uniprot ID:** -")
+            
+            with col3:
+                # c. 基因组位置（UCSC格式）
+                if gene_info.get('genome_location'):
+                    st.markdown(f"**基因组位置:**  ")
+                    st.markdown(f"`{gene_info['genome_location']}`")
+                    # 添加UCSC链接
+                    ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_gene={gene_info['gene_symbol']}"
+                    st.caption(f"[🔗 UCSC Genome Browser]({ucsc_url})")
+                else:
+                    st.markdown("**基因组位置:** -")
             
             st.divider()
             
-            # d. 蛋白定位与功能
-            st.markdown("**🎯 蛋白定位与功能**")
+            # ===== 第二行：蛋白定位与功能 =====
+            st.markdown("#### 🎯 蛋白定位与功能")
             loc = gene_info.get('protein_localization', {})
             func = gene_info.get('protein_function', {})
             
             loc_col1, loc_col2 = st.columns(2)
             with loc_col1:
+                st.markdown("**亚细胞定位**")
                 if loc.get('subcellular_main'):
-                    st.write(f"- **主要亚细胞定位:** {loc['subcellular_main']}")
+                    st.markdown(f"- **主要定位:** {loc['subcellular_main']}")
                 if loc.get('subcellular_additional'):
-                    st.write(f"- **其他定位:** {loc['subcellular_additional']}")
+                    st.markdown(f"- **其他定位:** {loc['subcellular_additional']}")
                 if loc.get('secretome_location'):
-                    st.write(f"- **分泌组定位:** {loc['secretome_location']}")
+                    st.markdown(f"- **分泌组定位:** {loc['secretome_location']}")
+                if loc.get('secretome_function'):
+                    st.markdown(f"- **分泌组功能:** {loc['secretome_function']}")
             
             with loc_col2:
+                st.markdown("**功能与疾病**")
                 if func.get('biological_process'):
-                    st.write(f"- **生物学过程:** {func['biological_process']}")
+                    st.markdown(f"- **生物学过程:** {func['biological_process']}")
                 if func.get('molecular_function'):
-                    st.write(f"- **分子功能:** {func['molecular_function']}")
+                    st.markdown(f"- **分子功能:** {func['molecular_function']}")
                 if func.get('disease_involvement'):
-                    st.write(f"- **疾病关联:** {func['disease_involvement']}")
+                    st.markdown(f"- **疾病关联:** {func['disease_involvement']}")
             
             st.divider()
             
-            # g. RNA在不同样本中的表达
-            st.markdown("**📈 RNA表达分布**")
+            # ===== 第三行：RNA表达与抗体 =====
+            col3_1, col3_2 = st.columns(2)
+            
+            with col3_1:
+                # e. RNA表达与定位
+                st.markdown("#### 📊 RNA表达与定位")
+                rna_exp = gene_info.get('rna_expression', {})
+                if rna_exp.get('tissue_specificity'):
+                    st.markdown(f"**组织特异性:** {rna_exp['tissue_specificity']}")
+                    if rna_exp.get('tissue_specific_ntpm'):
+                        st.caption(f"nTPM: {rna_exp['tissue_specific_ntpm']}")
+                else:
+                    st.markdown("*暂无RNA表达数据*")
+            
+            with col3_2:
+                # f. 抗体推荐
+                st.markdown("#### 🧪 抗体推荐")
+                antibody = gene_info.get('antibody', {})
+                if antibody.get('name'):
+                    # 优先使用基因页面链接，更稳定
+                    antibody_name = antibody['name']
+                    hpa_url = antibody.get('hpa_gene_url') or antibody.get('hpa_search_url', '')
+                    st.markdown(f"**产品名称:** [{antibody_name}]({hpa_url})")
+                    st.caption(f"[在HPA数据库中查看抗体详情]({hpa_url})")
+                else:
+                    st.markdown("*暂无抗体推荐*")
+            
+            st.divider()
+            
+            # ===== 第四行：RNA在不同样本中的表达 =====
+            st.markdown("#### 📈 RNA在不同样本中的表达")
             dist = gene_info.get('rna_distribution', {})
             
             dist_cols = st.columns(4)
             
+            # g. RNA在不同组织、细胞、肿瘤和血细胞中的表达
             # 组织
             tissue = dist.get('tissue', {})
             with dist_cols[0]:
-                st.markdown("**组织**")
+                st.markdown("**🧬 组织**")
                 if tissue.get('specificity'):
-                    st.write(f"{tissue['specificity']}")
+                    st.markdown(f"{tissue['specificity']}")
                     if tissue.get('specific_ntpm'):
                         st.caption(f"nTPM: {tissue['specific_ntpm']}")
+                else:
+                    st.caption("-")
             
             # 单细胞
             sc = dist.get('single_cell', {})
             with dist_cols[1]:
-                st.markdown("**单细胞**")
+                st.markdown("**🔬 单细胞**")
                 if sc.get('specificity'):
-                    st.write(f"{sc['specificity']}")
+                    st.markdown(f"{sc['specificity']}")
                     if sc.get('specific_ncpm'):
                         st.caption(f"nCPM: {sc['specific_ncpm']}")
+                else:
+                    st.caption("-")
             
             # 肿瘤
             cancer = dist.get('cancer', {})
             with dist_cols[2]:
-                st.markdown("**肿瘤**")
+                st.markdown("**⚕️ 肿瘤**")
                 if cancer.get('specificity'):
-                    st.write(f"{cancer['specificity']}")
+                    st.markdown(f"{cancer['specificity']}")
                     if cancer.get('specific_ptpm'):
                         st.caption(f"pTPM: {cancer['specific_ptpm']}")
+                else:
+                    st.caption("-")
             
             # 血细胞
             blood = dist.get('blood', {})
             with dist_cols[3]:
-                st.markdown("**血细胞**")
+                st.markdown("**🩸 血细胞**")
                 if blood.get('specificity'):
-                    st.write(f"{blood['specificity']}")
+                    st.markdown(f"{blood['specificity']}")
                     if blood.get('specific_ntpm'):
                         st.caption(f"nTPM: {blood['specific_ntpm']}")
+                else:
+                    st.caption("-")
 
 
 # ==================== 报告导出 ====================
@@ -5407,6 +5479,7 @@ def main():
     try:
         hpa_manager = HPADataManager()
         hpa_manager.check_and_download()
+        st.session_state['hpa_manager'] = hpa_manager  # 存入session_state供基因自动补全服务使用
     except Exception as e:
         st.warning(f"HPA数据管理器初始化警告: {e}")
 
