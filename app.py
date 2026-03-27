@@ -220,277 +220,6 @@ class HPACellLineAutocompleteService:
 
 
 # ==================== HPA基因自动补全服务（基于Gene synonym）====================
-class HPAGeneAutocompleteService:
-    """基于HPA proteinatlas.tsv的Gene synonym列的基因自动补全服务"""
-    
-    def __init__(self, hpa_manager=None):
-        self.hpa_manager = hpa_manager
-        self.search_index = {}
-        self.gene_data_cache = {}
-        self._build_search_index()
-    
-    def _build_search_index(self):
-        """从proteinatlas.tsv构建基因搜索索引，如文件不存在则触发下载"""
-        data_file = None
-        
-        if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
-            data_file = self.hpa_manager.data_file
-        else:
-            local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
-            data_file = os.path.join(local_dir, "proteinatlas.tsv")
-        
-        # 如果文件不存在，尝试触发下载
-        if not data_file or not os.path.exists(data_file):
-            logger.warning("HPA数据文件不存在，尝试下载...")
-            if self.hpa_manager and hasattr(self.hpa_manager, 'check_and_download'):
-                try:
-                    self.hpa_manager.check_and_download()
-                except Exception as e:
-                    logger.error(f"自动下载HPA数据失败: {e}")
-            
-            # 再次检查文件是否存在
-            if not os.path.exists(data_file):
-                logger.warning("HPA数据文件下载失败或不存在，基因自动补全将不可用")
-                return
-        
-        try:
-            with open(data_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f, delimiter='\t')
-                for row in reader:
-                    gene_symbol = row.get('Gene name', '').strip()
-                    ensembl_id = row.get('Gene', '').strip()
-                    synonyms_str = row.get('Gene synonym', '').strip()
-                    
-                    if not gene_symbol:
-                        continue
-                    
-                    gene_key = gene_symbol.upper()
-                    
-                    self.gene_data_cache[gene_key] = {
-                        'gene_symbol': gene_symbol,
-                        'ensembl_id': ensembl_id,
-                        'synonyms': synonyms_str,
-                        'chromosome': row.get('Chromosome', ''),
-                        'position': row.get('Position', ''),
-                        'uniprot': row.get('Uniprot', ''),
-                        'description': row.get('Gene description', '')
-                    }
-                    
-                    self._add_to_index(gene_symbol, gene_symbol, ensembl_id, 'primary')
-                    
-                    if synonyms_str:
-                        for syn in synonyms_str.split(','):
-                            syn_clean = syn.strip()
-                            if syn_clean and syn_clean.upper() != gene_symbol.upper():
-                                self._add_to_index(syn_clean, gene_symbol, ensembl_id, 'synonym')
-                    
-        except Exception as e:
-            logger.error(f"构建HPA基因索引失败: {e}")
-    
-    def _add_to_index(self, name, gene_symbol, ensembl_id, name_type):
-        norm = self._normalize(name)
-        if norm and norm not in self.search_index:
-            self.search_index[norm] = {
-                'gene_symbol': gene_symbol,
-                'ensembl_id': ensembl_id,
-                'name_type': name_type,
-                'original_name': name
-            }
-    
-    def _normalize(self, name):
-        if not name:
-            return ""
-        return name.upper().replace('-', '').replace(' ', '').replace('_', '')
-    
-    def get_suggestions(self, query, limit=8):
-        if not query or len(query) < 2:
-            return []
-        
-        query_norm = self._normalize(query)
-        if not query_norm:
-            return []
-        
-        matches = []
-        seen_genes = set()
-        
-        if query_norm in self.search_index:
-            info = self.search_index[query_norm]
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes:
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'exact',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 100
-                })
-                seen_genes.add(gene_symbol.upper())
-        
-        for norm, info in self.search_index.items():
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes and norm.startswith(query_norm):
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'prefix',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 80 - len(norm)
-                })
-                seen_genes.add(gene_symbol.upper())
-                if len(seen_genes) >= limit * 2:
-                    break
-        
-        for norm, info in self.search_index.items():
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes and query_norm in norm:
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'substring',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 50
-                })
-                seen_genes.add(gene_symbol.upper())
-                if len(seen_genes) >= limit * 2:
-                    break
-        
-        if len(query_norm) >= 3:
-            for norm, info in self.search_index.items():
-                gene_symbol = info['gene_symbol']
-                if gene_symbol.upper() not in seen_genes:
-                    sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
-                    if sim > 0.6:
-                        matches.append({
-                            'display_name': gene_symbol,
-                            'gene_symbol': gene_symbol,
-                            'match_type': 'fuzzy',
-                            'matched_name': info['original_name'],
-                            'name_type': info['name_type'],
-                            'score': int(sim * 40)
-                        })
-                        seen_genes.add(gene_symbol.upper())
-                        if len(seen_genes) >= limit * 2:
-                            break
-        
-        matches.sort(key=lambda x: (x['score'], x['display_name']), reverse=True)
-        return matches[:limit]
-    
-    def get_gene_info(self, gene_symbol):
-        return self.gene_data_cache.get(gene_symbol.upper())
-    
-    def is_valid_gene(self, gene_symbol):
-        return gene_symbol.upper() in self.gene_data_cache
-
-
-# ==================== HPA基因详细信息提取服务 ====================
-class HPAGeneDetailService:
-    """从proteinatlas.tsv提取基因详细信息"""
-    
-    def __init__(self, hpa_manager=None):
-        self.hpa_manager = hpa_manager
-        self.data_file = self._get_data_file()
-    
-    def _get_data_file(self):
-        if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
-            return self.hpa_manager.data_file
-        local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
-        return os.path.join(local_dir, "proteinatlas.tsv")
-    
-    def get_gene_details(self, gene_symbol):
-        """获取基因详细信息，如文件不存在则尝试下载"""
-        if not self.data_file:
-            return None
-        
-        # 如果文件不存在，尝试触发下载
-        if not os.path.exists(self.data_file):
-            logger.warning("HPA数据文件不存在，尝试下载...")
-            if self.hpa_manager and hasattr(self.hpa_manager, 'check_and_download'):
-                try:
-                    self.hpa_manager.check_and_download()
-                    # 更新数据文件路径（可能下载后路径有变化）
-                    if hasattr(self.hpa_manager, 'data_file'):
-                        self.data_file = self.hpa_manager.data_file
-                except Exception as e:
-                    logger.error(f"自动下载HPA数据失败: {e}")
-            
-            # 再次检查
-            if not os.path.exists(self.data_file):
-                logger.warning("HPA数据文件不可用")
-                return None
-        
-        gene_symbol_upper = gene_symbol.upper().strip()
-        
-        try:
-            with open(self.data_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f, delimiter='\t')
-                for row in reader:
-                    if row.get('Gene name', '').upper().strip() == gene_symbol_upper:
-                        return self._extract_gene_data(row)
-        except Exception as e:
-            logger.error(f"获取基因详情失败: {e}")
-        
-        return None
-    
-    def _extract_gene_data(self, row):
-        ensembl_id = row.get('Gene', '')
-        uniprot_id = row.get('Uniprot', '')
-        chromosome = row.get('Chromosome', '')
-        position = row.get('Position', '')
-        
-        return {
-            'gene_symbol': row.get('Gene name', ''),
-            'ensembl_id': ensembl_id,
-            'ensembl_url': f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={ensembl_id}" if ensembl_id else '',
-            'uniprot_id': uniprot_id,
-            'uniprot_url': f"https://www.uniprot.org/uniprotkb/{uniprot_id}" if uniprot_id else '',
-            'genome_location': f"{chromosome}: {position}" if chromosome and position else '',
-            'chromosome': chromosome,
-            'position': position,
-            'protein_localization': {
-                'subcellular_main': row.get('Subcellular main location', ''),
-                'subcellular_additional': row.get('Subcellular additional location', ''),
-                'secretome_location': row.get('Secretome location', ''),
-                'secretome_function': row.get('Secretome function', '')
-            },
-            'protein_function': {
-                'biological_process': row.get('Biological process', ''),
-                'molecular_function': row.get('Molecular function', ''),
-                'disease_involvement': row.get('Disease involvement', '')
-            },
-            'rna_expression': {
-                'tissue_specificity': row.get('RNA tissue specificity', ''),
-                'tissue_specific_ntpm': row.get('RNA tissue specific nTPM', '')
-            },
-            'antibody': {
-                'name': row.get('Antibody', ''),
-                'hpa_search_url': f"https://www.proteinatlas.org/search/{row.get('Antibody', '').replace(' ', '%20')}" if row.get('Antibody') else '',
-                'hpa_gene_url': f"https://www.proteinatlas.org/{row.get('Gene', '')}" if row.get('Gene') else ''
-            },
-            'rna_distribution': {
-                'tissue': {
-                    'specificity': row.get('RNA tissue specificity', ''),
-                    'specific_ntpm': row.get('RNA tissue specific nTPM', '')
-                },
-                'single_cell': {
-                    'specificity': row.get('RNA single cell type specificity', ''),
-                    'specific_ncpm': row.get('RNA single cell type specific nCPM', '')
-                },
-                'cancer': {
-                    'specificity': row.get('RNA cancer specificity', ''),
-                    'specific_ptpm': row.get('RNA cancer specific pTPM', '')
-                },
-                'blood': {
-                    'specificity': row.get('RNA blood cell specificity', ''),
-                    'specific_ntpm': row.get('RNA blood cell specific nTPM', '')
-                }
-            }
-        }
-
-
-# ==================== 细胞系名称标准化验证模块 ====================
 class CellLineNormalizer:
     """细胞系名称标准化、模糊匹配验证（解决书写不规范问题）"""
 
@@ -1784,107 +1513,30 @@ class AuthManager:
             return True
 
 # ==================== HPA数据管理（修复版 - 移除rna_celline依赖） ====================
+# ==================== HPA数据管理（简化版 - 仅用于下载和数据路径）====================
 class HPADataManager:
-    """HPA数据管理 - 修复版（适配v25.0，仅使用proteinatlas.tsv）"""
+    """HPA数据管理 - 简化版（仅保留下载功能）"""
     HPA_URL = "https://www.proteinatlas.org/download/proteinatlas.tsv.zip"
-    # 移除 RNA_CELL_LINE_URL - v25.0已整合到proteinatlas.tsv
     LOCAL_DIR = "hpa_data"
-    DB_FILE = "hpa_cache.db"
-
-    # 常用细胞系列表（慢病毒包装和蛋白表达常用）
-    COMMON_CELL_LINES = {
-        'packaging': ['HEK293', 'HEK293T', 'HEK-293', 'HEK-293T'],
-        'common_expression': ['HeLa', 'A549', 'HepG2', 'MCF7', 'U2OS', 'HCT116'],
-        'kidney': ['HK-2', 'HK2'],
-        'liver': ['HepG2', 'Huh7'],
-        'lung': ['A549', 'NCI-H226', 'H1975', 'H1299', 'Calu-3'],
-        'brain': ['SH-SY5Y', 'U-87 MG', 'SK-N-SH'],
-        'blood': ['K-562', 'THP-1', 'Jurkat'],
-        'fibroblast': ['NIH/3T3', 'MRC-5']
-    }
-
-    # HPA参考基因（已验证的housekeeping genes）
-    REFERENCE_GENES = {
-        'high_stability': ['GAPDH', 'ACTB', 'TUBB', 'UBC', 'RPLP0', 'PPIA', 'HPRT1'],
-        'medium_stability': ['GUSB', 'TBP', 'YWHAZ'],
-        'cell_line_variable': ['HMBS', 'SDHA']  # 在某些细胞系中不稳定
-    }
 
     def __init__(self):
         self.local_dir = self.LOCAL_DIR
-        self.db_path = os.path.join(self.local_dir, self.DB_FILE)
         self.data_file = os.path.join(self.local_dir, "proteinatlas.tsv")
-        # 移除 rna_cell_line_file 相关
         self._init_storage()
-        self._gene_symbol_to_ensembl = {}
 
     def _init_storage(self):
         if not os.path.exists(self.local_dir):
             os.makedirs(self.local_dir)
-        if not os.path.exists(self.db_path):
-            self._init_database()
-
-    def _init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS cell_line_expression (
-                gene_symbol TEXT,
-                ensembl_id TEXT,
-                cell_line TEXT,
-                rna_level REAL,
-                protein_level TEXT,
-                reliability TEXT,
-                last_updated TIMESTAMP,
-                PRIMARY KEY (gene_symbol, cell_line)
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS gene_mapping (
-                gene_symbol TEXT PRIMARY KEY,
-                ensembl_id TEXT,
-                gene_name TEXT
-            )
-        ''')
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        conn.close()
 
     def check_and_download(self):
-        """检查并下载HPA数据（仅proteinatlas.tsv，包含所有细胞系数据）"""
-        needs_download = False
+        """检查并下载HPA数据"""
         if not os.path.exists(self.data_file):
-            needs_download = True
-        else:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT value, updated_at FROM metadata WHERE key='last_check'")
-            result = cursor.fetchone()
-            conn.close()
-
-            if result:
-                try:
-                    last_check = datetime.fromisoformat(result[1])
-                    if datetime.now() - last_check > timedelta(days=30):
-                        needs_download = True
-                except:
-                    needs_download = True
-            else:
-                needs_download = True
-
-        if needs_download:
             self._download_hpa_data()
 
     def _download_hpa_data(self):
-        """下载proteinatlas.tsv（包含所有细胞系RNA数据）"""
+        """下载proteinatlas.tsv"""
         try:
-            logger.info("正在下载HPA数据库（proteinatlas.tsv，约200MB，包含细胞系RNA数据），请稍候...")
+            logger.info("正在下载HPA数据库（proteinatlas.tsv，约200MB），请稍候...")
             zip_path = os.path.join(self.local_dir, "proteinatlas.tsv.zip")
 
             response = requests.get(self.HPA_URL, stream=True, timeout=300)
@@ -1908,763 +1560,310 @@ class HPADataManager:
 
             # 验证文件是否存在
             if not os.path.exists(self.data_file):
-                # 检查解压后的实际文件名
                 extracted_files = os.listdir(self.local_dir)
-                logger.info(f"解压后的文件: {extracted_files}")
-                # 可能文件名不同
                 for f in extracted_files:
                     if f.endswith('.tsv') and 'proteinatlas' in f.lower():
                         self.data_file = os.path.join(self.local_dir, f)
                         logger.info(f"使用实际文件名: {f}")
                         break
 
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES (?, ?, ?)",
-                ('last_check', datetime.now().isoformat(), datetime.now().isoformat())
-            )
-            conn.commit()
-            conn.close()
-
             os.remove(zip_path)
-            st.success("HPA数据下载完成（包含细胞系RNA表达数据）")
+            st.success("HPA数据下载完成")
 
         except Exception as e:
             logger.error(f"HPA download error: {e}", exc_info=True)
             st.error(f"HPA数据下载失败: {str(e)}")
 
-    def _load_gene_mapping(self):
-        """从proteinatlas.tsv加载Gene Symbol到Ensembl ID的映射"""
-        if self._gene_symbol_to_ensembl:
-            return
 
-        if not os.path.exists(self.data_file):
+# ==================== HPA基因自动补全服务（基于Gene synonym）====================
+class HPAGeneAutocompleteService:
+    """基于HPA proteinatlas.tsv的Gene synonym列的基因自动补全服务"""
+    
+    def __init__(self, hpa_manager: 'HPADataManager' = None):
+        self.hpa_manager = hpa_manager
+        self.search_index = {}  # {normalized_name: {gene_symbol, synonyms, ensembl_id}}
+        self.gene_data_cache = {}  # {gene_symbol_upper: gene_data_dict}
+        self._build_search_index()
+    
+    def _build_search_index(self):
+        """从proteinatlas.tsv构建基因搜索索引"""
+        data_file = None
+        
+        # 尝试获取HPA数据文件路径
+        if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
+            data_file = self.hpa_manager.data_file
+        else:
+            local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
+            data_file = os.path.join(local_dir, "proteinatlas.tsv")
+        
+        if not data_file or not os.path.exists(data_file):
+            logger.warning("HPA数据文件不存在，基因自动补全将不可用")
             return
-
+        
         try:
-            import csv
-            with open(self.data_file, 'r', encoding='utf-8') as f:
+            with open(data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter='\t')
                 for row in reader:
-                    ensembl_id = row.get('Gene', '')
-                    gene_name = row.get('Gene name', '')
-
-                    if ensembl_id and gene_name:
-                        self._gene_symbol_to_ensembl[gene_name.upper()] = ensembl_id
-                        self._gene_symbol_to_ensembl[gene_name] = ensembl_id
-                        if ',' in gene_name:
-                            for name in gene_name.split(','):
-                                clean_name = name.strip()
-                                if clean_name:
-                                    self._gene_symbol_to_ensembl[clean_name.upper()] = ensembl_id
+                    gene_symbol = row.get('Gene name', '').strip()
+                    ensembl_id = row.get('Gene', '').strip()
+                    synonyms_str = row.get('Gene synonym', '').strip()
+                    
+                    if not gene_symbol:
+                        continue
+                    
+                    gene_key = gene_symbol.upper()
+                    
+                    # 存储基因数据
+                    self.gene_data_cache[gene_key] = {
+                        'gene_symbol': gene_symbol,
+                        'ensembl_id': ensembl_id,
+                        'synonyms': synonyms_str,
+                        'chromosome': row.get('Chromosome', ''),
+                        'position': row.get('Position', ''),
+                        'uniprot': row.get('Uniprot', ''),
+                        'description': row.get('Gene description', '')
+                    }
+                    
+                    # 索引基因symbol
+                    self._add_to_index(gene_symbol, gene_symbol, ensembl_id, 'primary')
+                    
+                    # 索引所有synonyms
+                    if synonyms_str:
+                        for syn in synonyms_str.split(','):
+                            syn_clean = syn.strip()
+                            if syn_clean and syn_clean.upper() != gene_symbol.upper():
+                                self._add_to_index(syn_clean, gene_symbol, ensembl_id, 'synonym')
+                    
         except Exception as e:
-            logger.error(f"Gene mapping load error: {e}")
-
-    def get_expression_data(self, gene_name: str, cell_line: str) -> Optional[Dict]:
-        """从proteinatlas.tsv获取表达数据（宽格式）"""
-        gene_symbol = gene_name.upper().strip()
-        cell_line_clean = cell_line.strip()
-
-        # 首先检查缓存
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            """SELECT rna_level, protein_level, reliability, ensembl_id
-               FROM cell_line_expression
-               WHERE gene_symbol=? AND cell_line=?""",
-            (gene_symbol, cell_line_clean)
-        )
-        result = cursor.fetchone()
-        conn.close()
-
-        if result:
-            return {
-                'rna_level': f"{result[0]:.1f} nTPM" if result[0] else "Not detected",
-                'protein_level': result[1] if result[1] else "N/A",
-                'reliability': result[2] if result[2] else "N/A",
-                'ensembl_id': result[3],
-                'source': 'cache'
+            logger.error(f"构建HPA基因索引失败: {e}")
+    
+    def _add_to_index(self, name: str, gene_symbol: str, ensembl_id: str, name_type: str):
+        """添加名称到搜索索引"""
+        norm = self._normalize(name)
+        if norm and norm not in self.search_index:
+            self.search_index[norm] = {
+                'gene_symbol': gene_symbol,
+                'ensembl_id': ensembl_id,
+                'name_type': name_type,
+                'original_name': name
             }
-
-        # 加载Gene映射
-        self._load_gene_mapping()
-
-        # 直接从proteinatlas.tsv查询（宽格式）- v25.0数据
-        return self._query_proteinatlas_file(gene_symbol, cell_line_clean)
-
-    def _query_proteinatlas_file(self, gene_symbol: str, cell_line: str) -> Optional[Dict]:
-        """查询proteinatlas.tsv文件（宽格式，v25.0）"""
-        try:
-            import csv
-
-            # 检查文件是否存在
-            if not os.path.exists(self.data_file):
-                logger.warning(f"HPA数据文件不存在: {self.data_file}")
-                # 尝试查找任何.tsv文件
-                if os.path.exists(self.local_dir):
-                    files = os.listdir(self.local_dir)
-                    tsv_files = [f for f in files if f.endswith('.tsv')]
-                    logger.info(f"目录中的文件: {files}")
-                    if tsv_files:
-                        self.data_file = os.path.join(self.local_dir, tsv_files[0])
-                        logger.info(f"找到替代文件: {tsv_files[0]}")
-                    else:
-                        logger.error("未找到任何.tsv文件，请检查数据下载")
-                        return None
-                else:
-                    logger.error(f"HPA数据目录不存在: {self.local_dir}")
-                    return None
-
-            ensembl_id = self._gene_symbol_to_ensembl.get(gene_symbol)
-            cell_line_variants = self._get_cell_line_variants(cell_line)
-
-            # 使用logger代替st.info避免重复输出
-            logger.info(f"查询HPA: 基因={gene_symbol}, 细胞系={cell_line}")
-            logger.info(f"尝试的细胞系名称变体: {cell_line_variants[:8]}")
-
-            with open(self.data_file, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f, delimiter='\t')
-                headers = reader.fieldnames
-
-                if not headers:
-                    return None
-
-                # 查找匹配的RNA列和Protein列（v25.0格式）
-                # RNA列格式: "RNA cell line <name> [nTPM]"
-                # Protein列格式: "Cell line <name>" 或包含蛋白水平信息
-                rna_col = None
-                protein_col = None
-
-                for header in headers:
-                    header_upper = header.upper()
-
-                    # RNA列匹配 - 处理多种可能的列名格式
-                    if 'RNA' in header_upper and 'CELL' in header_upper:
-                        for variant in cell_line_variants:
-                            # 匹配 "RNA cell line A549 [nTPM]" 或类似格式
-                            if variant in header_upper.replace(' ', '').replace('-', '').replace('_', ''):
-                                rna_col = header
-                                break
-                            # 也尝试匹配部分名称（如"A549"匹配"A-549"）
-                            if variant.replace('-', '') in header_upper.replace(' ', '').replace('-', '').replace('_', ''):
-                                rna_col = header
-                                break
-
-                    # Protein列匹配 - 细胞系蛋白表达列
-                    if any(x in header_upper for x in ['PROTEIN', 'CELL LINE', 'LEVEL']) and 'RNA' not in header_upper:
-                        for variant in cell_line_variants:
-                            if variant in header_upper.replace(' ', '').replace('-', '').replace('_', ''):
-                                protein_col = header
-                                break
-
-                # 如果没找到特定列，尝试通用匹配
-                if not rna_col:
-                    for header in headers:
-                        header_clean = header.upper().replace(' ', '').replace('-', '').replace('_', '')
-                        for variant in cell_line_variants:
-                            if variant in header_clean and 'RNA' in header_clean:
-                                rna_col = header
-                                break
-                        if rna_col:
-                            break
-
-                if not rna_col and not protein_col:
-                    # 调试：列出所有RNA相关的列名
-                    rna_headers = [h for h in headers if 'RNA' in h.upper() or 'CELL' in h.upper()]
-                    logger.warning(f"未找到细胞系 {cell_line} 的列。尝试的变体: {cell_line_variants}")
-                    logger.warning(f"可用的RNA/CELL列 (前20个): {rna_headers[:20]}")
-
-                    # 尝试更宽松的匹配 - 只要包含细胞系名称的任何部分
-                    for header in headers:
-                        header_clean = header.upper().replace(' ', '').replace('-', '').replace('_', '').replace('[', '').replace(']', '')
-                        for variant in cell_line_variants:
-                            if variant in header_clean:
-                                if 'RNA' in header.upper() and not rna_col:
-                                    rna_col = header
-                                    logger.info(f"宽松匹配到RNA列: {header}")
-                                if 'PROTEIN' in header.upper() and not protein_col:
-                                    protein_col = header
-                                    logger.info(f"宽松匹配到Protein列: {header}")
-                                break
-
-                    if not rna_col and not protein_col:
-                        return None
-
-                # 查找基因数据
-                for row in reader:
-                    row_ensembl = row.get('Gene', '').strip()
-                    row_gene_name = row.get('Gene name', '').strip()
-
-                    # 匹配基因
-                    match = False
-                    if ensembl_id and row_ensembl == ensembl_id:
-                        match = True
-                    elif row_gene_name.upper() == gene_symbol:
-                        match = True
-                    elif gene_symbol in row_gene_name.upper().split(','):
-                        match = True
-
-                    if match:
-                        rna_level = row.get(rna_col, 'Not detected') if rna_col else 'Not detected'
-                        prot_level = row.get(protein_col, 'Not detected') if protein_col else 'Not detected'
-
-                        # 解析RNA数值用于缓存
-                        rna_numeric = None
-                        if isinstance(rna_level, str):
-                            # 处理 "15.6 nTPM" 格式
-                            match_num = re.search(r'([\d.]+)', rna_level)
-                            if match_num:
-                                try:
-                                    rna_numeric = float(match_num.group(1))
-                                except:
-                                    pass
-
-                        result = {
-                            'rna_level': rna_level,
-                            'protein_level': prot_level,
-                            'reliability': 'Supported',
-                            'ensembl_id': row_ensembl,
-                            'source': 'proteinatlas.tsv',
-                            'matched_rna_column': rna_col,
-                            'matched_protein_column': protein_col
-                        }
-
-                        self._cache_result(gene_symbol, cell_line, result, row_ensembl, rna_numeric)
-                        logger.info(f"HPA查询成功: {gene_symbol} in {cell_line}, RNA={rna_level}")
-                        return result
-
-            logger.warning(f"HPA未找到基因 {gene_symbol} (Ensembl: {ensembl_id}) 在数据文件中")
-            return None
-
-        except Exception as e:
-            logger.error(f"Proteinatlas query error: {e}")
-            return None
-
-    def _get_cell_line_variants(self, cell_line: str) -> List[str]:
-        """生成细胞系名称的各种变体用于匹配HPA v25.0列名"""
-        variants = []
-        base = cell_line.strip().upper()
-
-        # 1. 添加原始格式
-        variants.append(base)
-
-        # 2. 添加去空格/去连字符版本（用于匹配清洗后的列名）
-        base_clean = base.replace(' ', '').replace('-', '').replace('_', '')
-        variants.append(base_clean)
-
-        # 3. 添加其他常见变体
-        variants.append(base.replace(' ', '-'))
-        variants.append(base.replace('-', ' '))
-        variants.append(base.replace(' ', '_'))
-
-        # 4. HPA v25.0 标准名称映射（关键！）
-        # 格式: HPA标准名称(带空格): [常见输入变体列表]
-        hpa_standard_names = {
-            'HEK 293': ['HEK293', 'HEK-293', 'HEK_293', '293', 'HEK 293', 'HEK293T'],
-            'HEK 293T': ['HEK293T', 'HEK-293T', 'HEK_293T', '293T', 'HEK 293T'],
-            'HeLa': ['HELA', 'HELA', 'HELA CELLS', 'CERVICAL'],
-            'A549': ['A549', 'A-549', 'A 549', 'LUNG'],
-            'Hep G2': ['HEPG2', 'HEP-G2', 'HEP G2', 'HEPATOCARCINOMA'],
-            'HCT 116': ['HCT116', 'HCT-116', 'HCT 116', 'COLON'],
-            'MCF7': ['MCF7', 'MCF-7', 'MCF 7', 'BREAST'],
-            'U-2 OS': ['U2OS', 'U-2OS', 'U2 OS', 'OSTEOSARCOMA'],
-            'SH-SY5Y': ['SHSY5Y', 'SH-SY5Y', 'SH SY5Y', 'NEUROBLASTOMA'],
-            'K-562': ['K562', 'K-562', 'K 562', 'LEUKEMIA'],
-            'THP-1': ['THP1', 'THP-1', 'THP 1', 'MONOCYTIC'],
-            'Jurkat': ['JURKAT', 'TCELL', 'LEUKEMIA'],
-            'NCI-H226': ['NCIH226', 'NCI-H226', 'H226', 'LUNGSQUAMOUS'],
-            'HK-2': ['HK2', 'HK-2', 'HK 2', 'RENAL'],
-            'U-87 MG': ['U87MG', 'U-87', 'U87', 'GLIOBLASTOMA'],
-        }
-
-        # 检查输入是否匹配某个标准名称或其变体
-        for standard_name, aliases in hpa_standard_names.items():
-            standard_clean = standard_name.replace(' ', '').replace('-', '').replace('_', '')
-
-            # 如果输入匹配标准名称（原始或清洗后）
-            if base == standard_name.upper() or base_clean == standard_clean:
-                # 添加标准名称及其所有变体
-                variants.append(standard_name.upper())  # 原始格式（带空格）
-                variants.append(standard_clean)  # 清洗格式
-                for alias in aliases:
-                    variants.append(alias.upper())
-                    variants.append(alias.upper().replace(' ', '').replace('-', '').replace('_', ''))
-                break
-
-            # 如果输入匹配某个别名
-            for alias in aliases:
-                alias_clean = alias.upper().replace(' ', '').replace('-', '').replace('_', '')
-                if base == alias.upper() or base_clean == alias_clean:
-                    # 添加标准名称及其所有变体
-                    variants.append(standard_name.upper())
-                    variants.append(standard_clean)
-                    for a in aliases:
-                        variants.append(a.upper())
-                        variants.append(a.upper().replace(' ', '').replace('-', '').replace('_', ''))
+    
+    def _normalize(self, name: str) -> str:
+        """标准化名称用于搜索"""
+        if not name:
+            return ""
+        return name.upper().replace('-', '').replace(' ', '').replace('_', '')
+    
+    def get_suggestions(self, query: str, limit: int = 8) -> List[Dict]:
+        """
+        获取基因建议（输入2个字符以上显示建议）
+        匹配逻辑：精确匹配 > 前缀匹配 > 包含匹配 > 模糊匹配
+        """
+        if not query or len(query) < 2:
+            return []
+        
+        query_norm = self._normalize(query)
+        if not query_norm:
+            return []
+        
+        matches = []
+        seen_genes = set()
+        
+        # 1. 精确匹配
+        if query_norm in self.search_index:
+            info = self.search_index[query_norm]
+            gene_symbol = info['gene_symbol']
+            if gene_symbol.upper() not in seen_genes:
+                matches.append({
+                    'display_name': gene_symbol,
+                    'gene_symbol': gene_symbol,
+                    'match_type': 'exact',
+                    'matched_name': info['original_name'],
+                    'name_type': info['name_type'],
+                    'score': 100
+                })
+                seen_genes.add(gene_symbol.upper())
+        
+        # 2. 前缀匹配
+        for norm, info in self.search_index.items():
+            gene_symbol = info['gene_symbol']
+            if gene_symbol.upper() not in seen_genes and norm.startswith(query_norm):
+                matches.append({
+                    'display_name': gene_symbol,
+                    'gene_symbol': gene_symbol,
+                    'match_type': 'prefix',
+                    'matched_name': info['original_name'],
+                    'name_type': info['name_type'],
+                    'score': 80 - len(norm)
+                })
+                seen_genes.add(gene_symbol.upper())
+                if len(seen_genes) >= limit * 2:
                     break
+        
+        # 3. 包含匹配
+        for norm, info in self.search_index.items():
+            gene_symbol = info['gene_symbol']
+            if gene_symbol.upper() not in seen_genes and query_norm in norm:
+                matches.append({
+                    'display_name': gene_symbol,
+                    'gene_symbol': gene_symbol,
+                    'match_type': 'substring',
+                    'matched_name': info['original_name'],
+                    'name_type': info['name_type'],
+                    'score': 50
+                })
+                seen_genes.add(gene_symbol.upper())
+                if len(seen_genes) >= limit * 2:
+                    break
+        
+        # 4. 模糊匹配（查询3字符以上）
+        if len(query_norm) >= 3:
+            for norm, info in self.search_index.items():
+                gene_symbol = info['gene_symbol']
+                if gene_symbol.upper() not in seen_genes:
+                    sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
+                    if sim > 0.6:
+                        matches.append({
+                            'display_name': gene_symbol,
+                            'gene_symbol': gene_symbol,
+                            'match_type': 'fuzzy',
+                            'matched_name': info['original_name'],
+                            'name_type': info['name_type'],
+                            'score': int(sim * 40)
+                        })
+                        seen_genes.add(gene_symbol.upper())
+                        if len(seen_genes) >= limit * 2:
+                            break
+        
+        # 排序并限制数量
+        matches.sort(key=lambda x: (x['score'], x['display_name']), reverse=True)
+        return matches[:limit]
+    
+    def get_gene_info(self, gene_symbol: str) -> Optional[Dict]:
+        """获取基因的完整信息"""
+        return self.gene_data_cache.get(gene_symbol.upper())
+    
+    def is_valid_gene(self, gene_symbol: str) -> bool:
+        """检查基因是否有效"""
+        return gene_symbol.upper() in self.gene_data_cache
 
-        # 5. 去重并返回
-        return list(set(v for v in variants if v))
 
-    def _cache_result(self, gene_symbol: str, cell_line: str, data: Dict, ensembl_id: str, rna_numeric: Optional[float] = None):
-        """缓存查询结果"""
+# ==================== HPA基因详细信息提取服务 ====================
+class HPAGeneDetailService:
+    """从proteinatlas.tsv提取基因详细信息"""
+    
+    def __init__(self, hpa_manager: 'HPADataManager' = None):
+        self.hpa_manager = hpa_manager
+        self.data_file = self._get_data_file()
+    
+    def _get_data_file(self) -> Optional[str]:
+        """获取数据文件路径"""
+        if self.hpa_manager and hasattr(self.hpa_manager, 'data_file'):
+            return self.hpa_manager.data_file
+        local_dir = os.path.join(os.path.expanduser("~"), ".hpa_data")
+        return os.path.join(local_dir, "proteinatlas.tsv")
+    
+    def get_gene_details(self, gene_symbol: str) -> Optional[Dict]:
+        """获取基因详细信息"""
+        if not self.data_file or not os.path.exists(self.data_file):
+            return None
+        
+        gene_symbol_upper = gene_symbol.upper().strip()
+        
         try:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-
-            # 使用传入的RNA数值或从字符串解析
-            if rna_numeric is None:
-                rna_val = data.get('rna_level', 'Not detected')
-                rna_numeric = None
-                if isinstance(rna_val, str) and 'nTPM' in rna_val:
-                    try:
-                        rna_numeric = float(rna_val.split()[0])
-                    except:
-                        pass
-
-            cursor.execute('''
-                INSERT OR REPLACE INTO cell_line_expression
-                (gene_symbol, ensembl_id, cell_line, rna_level, protein_level, reliability, last_updated)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                gene_symbol,
-                ensembl_id,
-                cell_line,
-                rna_numeric,
-                str(data.get('protein_level', ''))[:100],
-                data.get('reliability', 'Unknown'),
-                datetime.now().isoformat()
-            ))
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            logger.error(f"Cache write error: {e}")
-
-    # 内参基因按亚细胞定位分类（包含分子量kDa）- 基于用户提供的完整列表
-    REFERENCE_GENES_BY_LOCATION = {
-        'whole_cell': [  # 全细胞/通用
-            {'gene': 'VCL', 'name': 'Vinculin', 'mw': 125, 'note': '全细胞'},
-            {'gene': 'ACTB', 'name': 'Beta-actin', 'mw': 42, 'note': '全细胞'},
-            {'gene': 'GAPDH', 'name': 'GAPDH', 'mw': 35, 'note': '全细胞'},
-            {'gene': 'PPIB', 'name': 'Cyclophilin B', 'mw': 24, 'note': '全细胞'},
-            {'gene': 'CFL1', 'name': 'Cofilin', 'mw': 20, 'note': '全细胞'},
-        ],
-        'membrane': [  # 细胞膜
-            {'gene': 'ATP1A1', 'name': 'Na+/K+ ATPase', 'mw': 110, 'note': '细胞膜'},
-            {'gene': 'TFRC', 'name': 'Transferrin Receptor', 'mw': 75, 'note': '细胞膜'},
-        ],
-        'nucleus': [  # 细胞核
-            {'gene': 'LMNB1', 'name': 'Lamin B1', 'mw': 66, 'note': '细胞核'},
-            {'gene': 'HDAC1', 'name': 'HDAC1', 'mw': 55, 'note': '细胞核'},
-            {'gene': 'YY1', 'name': 'YY1', 'mw': 50, 'note': '细胞核'},
-            {'gene': 'TBP', 'name': 'TBP', 'mw': 35, 'note': '细胞核'},
-            {'gene': 'PCNA', 'name': 'PCNA', 'mw': 30, 'note': '细胞核'},
-            {'gene': 'HIST1H3A', 'name': 'Histone H3', 'mw': 15, 'note': '细胞核'},
-        ],
-        'mitochondria': [  # 线粒体
-            {'gene': 'HSP60', 'name': 'HSP60', 'mw': 60, 'note': '线粒体'},
-            {'gene': 'VDAC1', 'name': 'VDAC1/Porin', 'mw': 30, 'note': '线粒体'},
-            {'gene': 'COX4I1', 'name': 'COX IV', 'mw': 20, 'note': '线粒体'},
-        ],
-        'cytoskeleton': [  # 细胞骨架
-            {'gene': 'TUBA1A', 'name': 'Alpha-tubulin', 'mw': 55, 'note': '细胞骨架'},
-            {'gene': 'TUBB', 'name': 'Beta-tubulin', 'mw': 50, 'note': '细胞骨架'},
-            {'gene': 'ACTB', 'name': 'Beta-actin', 'mw': 40, 'note': '细胞骨架'},
-        ],
-        'er': [  # 内质网
-            {'gene': 'CANX', 'name': 'Calnexin', 'mw': 67, 'note': '内质网'},
-            {'gene': 'PDIA3', 'name': 'ERp57', 'mw': 57, 'note': '内质网'},
-        ],
-        'general': [  # 其他通用
-            {'gene': 'RPLP0', 'name': 'Ribosomal Protein L0', 'mw': 34, 'note': '核糖体'},
-        ]
-    }
-
-    def get_protein_localization(self, gene_symbol: str) -> Dict:
-        """从proteinatlas.tsv获取蛋白亚细胞定位信息"""
-        try:
-            import csv
-            gene_upper = gene_symbol.upper()
-
-            if not os.path.exists(self.data_file):
-                return {'error': 'HPA数据文件不存在'}
-
-            self._load_gene_mapping()
-            ensembl_id = self._gene_symbol_to_ensembl.get(gene_upper)
-
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter='\t')
-                headers = reader.fieldnames
-
-                # 查找定位相关列
-                loc_main_col = None
-                loc_add_col = None
-                go_cc_col = None  # Gene Ontology Cellular Component
-
-                for h in headers:
-                    h_upper = h.upper()
-                    if 'MAIN' in h_upper and ('LOCATION' in h_upper or 'LOCALI' in h_upper):
-                        loc_main_col = h
-                    elif 'ADDITIONAL' in h_upper and ('LOCATION' in h_upper or 'LOCALI' in h_upper):
-                        loc_add_col = h
-                    elif 'GO' in h_upper and 'CC' in h_upper:
-                        go_cc_col = h
-
                 for row in reader:
-                    row_gene = row.get('Gene name', '').strip().upper()
-                    row_ensembl = row.get('Gene', '').strip()
-
-                    if row_gene == gene_upper or (ensembl_id and row_ensembl == ensembl_id):
-                        main_loc = row.get(loc_main_col, 'Unknown') if loc_main_col else 'Unknown'
-                        add_loc = row.get(loc_add_col, '') if loc_add_col else ''
-                        go_cc = row.get(go_cc_col, '') if go_cc_col else ''
-
-                        # 解析定位类型
-                        locations = []
-                        if main_loc and main_loc != 'Unknown':
-                            locations.append(main_loc)
-                        if add_loc:
-                            locations.extend([l.strip() for l in add_loc.split(',')])
-
-                        # 判断定位类别
-                        location_types = self._classify_localization(locations, go_cc)
-
-                        return {
-                            'gene': gene_symbol,
-                            'main_localization': main_loc,
-                            'additional_localization': add_loc,
-                            'go_cellular_component': go_cc,
-                            'location_types': location_types,
-                            'all_locations': locations
-                        }
-
-            return {'error': f'未找到基因 {gene_symbol} 的定位信息'}
-
+                    if row.get('Gene name', '').upper().strip() == gene_symbol_upper:
+                        return self._extract_gene_data(row)
         except Exception as e:
-            logger.error(f"获取蛋白定位失败: {e}")
-            return {'error': str(e)}
-
-    def _classify_localization(self, locations: List[str], go_cc: str) -> List[str]:
-        """将定位分类为膜、胞质、核等"""
-        loc_text = ' '.join(locations).lower() + ' ' + go_cc.lower()
-        types = []
-
-        if any(x in loc_text for x in ['plasma membrane', 'membrane', 'cell surface', 'extracellular']):
-            types.append('membrane')
-        if any(x in loc_text for x in ['cytoplasm', 'cytosol']):
-            types.append('cytoplasm')
-        if any(x in loc_text for x in ['cytoskeleton', 'actin', 'tubulin', 'microtubule', 'microfilament']):
-            types.append('cytoskeleton')
-        if any(x in loc_text for x in ['nucleus', 'nuclear', 'nucleoli', 'chromosome']):
-            types.append('nucleus')
-        if any(x in loc_text for x in ['mitochondria', 'mitochondrial']):
-            types.append('mitochondria')
-        if any(x in loc_text for x in ['endoplasmic reticulum', 'er membrane']):
-            types.append('er')
-        if any(x in loc_text for x in ['golgi']):
-            types.append('golgi')
-
-        return types if types else ['whole_cell']
-
-    def get_reference_genes_for_location(self, location_types: List[str], target_cell_line: str,
-                                          target_mw: float = None) -> Dict:
-        """根据定位类型和分子量推荐内参基因"""
-        recommendations = {
-            'location_types': location_types,
-            'reference_genes': [],
-            'recommendation': ''
+            logger.error(f"获取基因详情失败: {e}")
+        
+        return None
+    
+    def _extract_gene_data(self, row: Dict) -> Dict:
+        """从行数据中提取基因信息"""
+        
+        # a. Ensembl ID 和链接
+        ensembl_id = row.get('Gene', '')
+        
+        # b. Uniprot ID 和链接
+        uniprot_id = row.get('Uniprot', '')
+        
+        # c. 基因组位置
+        chromosome = row.get('Chromosome', '')
+        position = row.get('Position', '')
+        
+        # d. 蛋白定位与功能
+        subcellular_main = row.get('Subcellular main location', '')
+        subcellular_add = row.get('Subcellular additional location', '')
+        secretome_loc = row.get('Secretome location', '')
+        secretome_func = row.get('Secretome function', '')
+        biological_process = row.get('Biological process', '')
+        molecular_func = row.get('Molecular function', '')
+        disease_involvement = row.get('Disease involvement', '')
+        
+        # e. RNA表达与定位
+        rna_tissue_specificity = row.get('RNA tissue specificity', '')
+        rna_tissue_specific_ntpm = row.get('RNA tissue specific nTPM', '')
+        
+        # f. 抗体推荐
+        antibody = row.get('Antibody', '')
+        
+        # g. RNA在不同样本中的表达
+        rna_single_cell = {
+            'specificity': row.get('RNA single cell type specificity', ''),
+            'specific_ncpm': row.get('RNA single cell type specific nCPM', '')
         }
-
-        # 收集候选内参（去重但保留多定位信息）
-        candidates_dict = {}
-        for loc_type in location_types:
-            if loc_type in self.REFERENCE_GENES_BY_LOCATION:
-                for ref in self.REFERENCE_GENES_BY_LOCATION[loc_type]:
-                    gene_name = ref['gene']
-                    if gene_name not in candidates_dict:
-                        candidates_dict[gene_name] = {
-                            **ref,
-                            'locations': [loc_type]
-                        }
-                    else:
-                        # 已存在，添加新的定位类型
-                        if loc_type not in candidates_dict[gene_name]['locations']:
-                            candidates_dict[gene_name]['locations'].append(loc_type)
-
-        candidates = list(candidates_dict.values())
-
-        # 如果没有特定定位的内参，使用全细胞内参
-        if not candidates:
-            candidates = self.REFERENCE_GENES_BY_LOCATION['whole_cell']
-
-        # 查询每个内参在指定细胞系中的表达
-        for ref in candidates:
-            data = self.get_expression_data(ref['gene'], target_cell_line)
-            if data and 'Not detected' not in str(data.get('rna_level', '')):
-                rna_str = data.get('rna_level', '0 nTPM')
-                try:
-                    match = re.search(r'([\d.]+)', str(rna_str))
-                    ntpm = float(match.group(1)) if match else 0
-                except:
-                    ntpm = 0
-
-                mw_diff = None
-                if target_mw and target_mw > 0:
-                    mw_diff = abs(target_mw - ref['mw'])
-
-                recommendations['reference_genes'].append({
-                    'gene': ref['gene'],
-                    'name': ref['name'],
-                    'mw_kda': ref['mw'],
-                    'location': ', '.join(ref.get('locations', [ref['note']])),
-                    'rna_ntpm': ntpm,
-                    'protein_level': data.get('protein_level', 'N/A'),
-                    'mw_difference': mw_diff,
-                    'recommended': mw_diff and mw_diff > 20  # 分子量差异>20kDa推荐
-                })
-
-        # 按分子量差异排序（推荐的优先，然后按差异大小）
-        recommendations['reference_genes'].sort(
-            key=lambda x: (0 if x['recommended'] else 1, x['mw_difference'] if x['mw_difference'] else 999)
-        )
-
-        # 生成推荐文本
-        top_recommended = [r for r in recommendations['reference_genes'] if r['recommended']][:3]
-        if top_recommended:
-            recommendations['recommendation'] = f"推荐内参: {', '.join([r['gene'] + f" ({r['mw_kda']}kDa)" for r in top_recommended])}"
-        elif recommendations['reference_genes']:
-            top3 = recommendations['reference_genes'][:3]
-            recommendations['recommendation'] = f"可用内参: {', '.join([r['gene'] + f" ({r['mw_kda']}kDa)" for r in top3])} (建议根据分子量选择)"
-        else:
-            recommendations['recommendation'] = "未找到该细胞系中稳定的内参基因"
-
-        return recommendations
-
-    def get_cell_line_expression_profile(self, gene_symbol: str, cell_line_category: str = 'all') -> Dict:
-        """
-        获取基因在多种细胞系中的表达谱（用于宿主细胞系选择）
-        """
-        gene_upper = gene_symbol.upper()
-
-        # 确定要查询的细胞系列表
-        if cell_line_category == 'all':
-            cell_lines = []
-            for cat_list in self.COMMON_CELL_LINES.values():
-                cell_lines.extend(cat_list)
-            cell_lines = list(set(cell_lines))
-        else:
-            cell_lines = self.COMMON_CELL_LINES.get(cell_line_category, [])
-
-        expression_profile = {
-            'gene': gene_symbol,
-            'category': cell_line_category,
-            'cell_lines_queried': cell_lines,
-            'expression_data': [],
-            'recommendations': {}
+        rna_cancer = {
+            'specificity': row.get('RNA cancer specificity', ''),
+            'specific_ptpm': row.get('RNA cancer specific pTPM', '')
         }
-
-        # 查询每个细胞系的表达
-        for cl in cell_lines:
-            data = self.get_expression_data(gene_upper, cl)
-            if data and 'Not detected' not in str(data.get('rna_level', '')):
-                # 解析nTPM数值
-                rna_str = data.get('rna_level', '0 nTPM')
-                try:
-                    match = re.search(r'([\d.]+)', str(rna_str))
-                    ntpm = float(match.group(1)) if match else 0
-                except:
-                    ntpm = 0
-
-                if ntpm > 0:  # 只记录有表达的
-                    expression_profile['expression_data'].append({
-                        'cell_line': cl,
-                        'rna_ntpm': ntpm,
-                        'protein_level': data.get('protein_level', 'N/A'),
-                        'reliability': data.get('reliability', 'Unknown')
-                    })
-
-        # 排序
-        expression_profile['expression_data'].sort(key=lambda x: x['rna_ntpm'], reverse=True)
-
-        # 生成推荐
-        if expression_profile['expression_data']:
-            high_expr = [x for x in expression_profile['expression_data'] if x['rna_ntpm'] > 100]
-            low_expr = [x for x in expression_profile['expression_data'] if x['rna_ntpm'] < 5]
-            medium_expr = [x for x in expression_profile['expression_data'] if 5 <= x['rna_ntpm'] <= 100]
-
-            expression_profile['recommendations'] = {
-                'high_expression_cell_lines': high_expr,
-                'low_expression_cell_lines': low_expr,
-                'medium_expression_cell_lines': medium_expr,
-                'suitable_for_overexpression': low_expr,
-                'suitable_for_endogenous_study': high_expr[:3] if high_expr else [],
-                'summary': self._generate_host_recommendation_summary(high_expr, low_expr, medium_expr)
-            }
-
-        return expression_profile
-
-    def _generate_host_recommendation_summary(self, high_expr, low_expr, medium_expr) -> str:
-        """生成宿主细胞系选择建议摘要"""
-        summary_parts = []
-
-        if low_expr:
-            summary_parts.append(f"✅ 推荐作为过表达宿主: {', '.join([x['cell_line'] for x in low_expr[:3]])}")
-
-        if high_expr:
-            summary_parts.append(f"⚠️ 不推荐作为过表达宿主: {', '.join([x['cell_line'] for x in high_expr[:3]])}")
-
-        return "; ".join(summary_parts) if summary_parts else "未获取到足够数据"
-
-    def get_reference_genes_stability(self, cell_line: str) -> Dict:
-        """
-        获取参考基因（内参基因）在指定细胞系中的表达稳定性数据
-        """
-        stability_data = {
-            'cell_line': cell_line,
-            'high_stability': [],
-            'medium_stability': [],
-            'not_detected': [],
-            'recommendation': ''
+        rna_blood = {
+            'specificity': row.get('RNA blood cell specificity', ''),
+            'specific_ntpm': row.get('RNA blood cell specific nTPM', '')
         }
-
-        for category, genes in self.REFERENCE_GENES.items():
-            for gene in genes:
-                data = self.get_expression_data(gene, cell_line)
-                if data:
-                    rna_str = data.get('rna_level', '0 nTPM')
-                    try:
-                        match = re.search(r'([\d.]+)', str(rna_str))
-                        ntpm = float(match.group(1)) if match else 0
-                    except:
-                        ntpm = 0
-
-                    gene_info = {'gene': gene, 'rna_ntpm': ntpm}
-
-                    if ntpm > 50:
-                        stability_data['high_stability'].append(gene_info)
-                    elif ntpm > 5:
-                        stability_data['medium_stability'].append(gene_info)
-                    else:
-                        stability_data['not_detected'].append(gene_info)
-
-        # 生成内参推荐
-        if stability_data['high_stability']:
-            top_refs = [x['gene'] for x in stability_data['high_stability'][:3]]
-            stability_data['recommendation'] = f"推荐使用 {', '.join(top_refs)} 作为该细胞系的内参基因"
-        else:
-            stability_data['recommendation'] = "警告：常用内参基因在该细胞系中表达较低"
-
-        return stability_data
-
-    def analyze_rna_protein_correlation(self, gene_symbol: str, cell_line: str) -> Dict:
-        """
-        分析RNA水平与蛋白水平的相关性（翻译效率评估）
-        """
-        data = self.get_expression_data(gene_symbol, cell_line)
-        if not data:
-            return {'error': '未找到数据'}
-
-        rna_str = data.get('rna_level', '0 nTPM')
-        protein_level = data.get('protein_level', 'Not detected')
-
-        try:
-            match = re.search(r'([\d.]+)', str(rna_str))
-            rna_ntpm = float(match.group(1)) if match else 0
-        except:
-            rna_ntpm = 0
-
-        # 蛋白水平分类
-        protein_cat = 'Unknown'
-        protein_str = str(protein_level).lower()
-        if any(x in protein_str for x in ['high', 'strong', 'intense', 'medium', 'moderate']):
-            protein_cat = 'High'
-        elif any(x in protein_str for x in ['low', 'weak']):
-            protein_cat = 'Low'
-        elif 'not detected' in protein_str:
-            protein_cat = 'Not detected'
-        elif protein_str and protein_str != 'n/a':
-            protein_cat = 'Detected'
-
-        # 评估RNA-Protein一致性
-        correlation_assessment = {}
-
-        if rna_ntpm > 50 and protein_cat in ['High', 'Detected']:
-            correlation_assessment = {
-                'status': 'consistent',
-                'interpretation': 'RNA与蛋白水平一致，翻译效率正常',
-                'translation_efficiency': 'normal'
-            }
-        elif rna_ntpm > 50 and protein_cat in ['Low', 'Not detected']:
-            correlation_assessment = {
-                'status': 'discrepancy_high_rna_low_protein',
-                'interpretation': '高RNA但低蛋白：可能存在翻译抑制或蛋白降解',
-                'translation_efficiency': 'low',
-                'notes': '建议：过表达可能需要密码子优化或添加稳定标签'
-            }
-        elif rna_ntpm < 10 and protein_cat in ['High', 'Detected']:
-            correlation_assessment = {
-                'status': 'discrepancy_low_rna_high_protein',
-                'interpretation': '低RNA但可检测蛋白：可能存在高效翻译',
-                'translation_efficiency': 'high',
-                'notes': '该基因可能受强转录调控，过表达需注意启动子选择'
-            }
-        else:
-            correlation_assessment = {
-                'status': 'consistent_low',
-                'interpretation': 'RNA和蛋白水平均低',
-                'translation_efficiency': 'low'
-            }
-
+        
         return {
-            'gene': gene_symbol,
-            'cell_line': cell_line,
-            'rna_ntpm': rna_ntpm,
-            'protein_level': protein_level,
-            'protein_category': protein_cat,
-            'correlation': correlation_assessment
+            'gene_symbol': row.get('Gene name', ''),
+            'ensembl_id': ensembl_id,
+            'ensembl_url': f"https://www.ensembl.org/Homo_sapiens/Gene/Summary?g={ensembl_id}" if ensembl_id else '',
+            'uniprot_id': uniprot_id,
+            'uniprot_url': f"https://www.uniprot.org/uniprotkb/{uniprot_id}" if uniprot_id else '',
+            'genome_location': f"{chromosome}: {position}" if chromosome and position else '',
+            'chromosome': chromosome,
+            'position': position,
+            'protein_localization': {
+                'subcellular_main': subcellular_main,
+                'subcellular_additional': subcellular_add,
+                'secretome_location': secretome_loc,
+                'secretome_function': secretome_func
+            },
+            'protein_function': {
+                'biological_process': biological_process,
+                'molecular_function': molecular_func,
+                'disease_involvement': disease_involvement
+            },
+            'rna_expression': {
+                'tissue_specificity': rna_tissue_specificity,
+                'tissue_specific_ntpm': rna_tissue_specific_ntpm
+            },
+            'antibody': {
+                'name': antibody,
+                'hpa_search_url': f"https://www.proteinatlas.org/search/{antibody.replace(' ', '%20')}" if antibody else '',
+                'hpa_gene_url': f"https://www.proteinatlas.org/{ensembl_id}" if ensembl_id else ''
+            },
+            'rna_distribution': {
+                'tissue': {
+                    'specificity': rna_tissue_specificity,
+                    'specific_ntpm': rna_tissue_specific_ntpm
+                },
+                'single_cell': rna_single_cell,
+                'cancer': rna_cancer,
+                'blood': rna_blood
+            }
         }
 
-    def get_antibody_validation_strategy(self, gene_symbol: str) -> Dict:
-        """
-        获取抗体验证策略（阳性/阴性对照细胞系选择）
-        """
-        profile = self.get_cell_line_expression_profile(gene_symbol, 'all')
-
-        positive_controls = []
-        negative_controls = []
-
-        for data in profile.get('expression_data', []):
-            protein = str(data.get('protein_level', '')).lower()
-            rna = data.get('rna_ntpm', 0)
-
-            # 阳性对照：可检测蛋白表达或高RNA
-            if any(x in protein for x in ['high', 'medium', 'strong', 'moderate', 'detected']) or rna > 100:
-                positive_controls.append({
-                    'cell_line': data['cell_line'],
-                    'rna_ntpm': rna,
-                    'protein_level': data['protein_level'],
-                    'use_case': '阳性对照（预期强信号）'
-                })
-            # 阴性对照：Not detected或极低表达
-            elif 'not detected' in protein or rna < 1:
-                negative_controls.append({
-                    'cell_line': data['cell_line'],
-                    'rna_ntpm': rna,
-                    'use_case': '阴性对照（预期无信号）'
-                })
-
-        # 排序
-        positive_controls.sort(key=lambda x: x['rna_ntpm'], reverse=True)
-        negative_controls.sort(key=lambda x: x['rna_ntpm'])
-
-        return {
-            'gene': gene_symbol,
-            'positive_control_cell_lines': positive_controls[:5],
-            'negative_control_cell_lines': negative_controls[:5]
-        }
-
-# ==================== API配置（修复版） ====================
 class APIConfig:
     @staticmethod
     def get_ncbi_credentials():
@@ -4398,10 +3597,7 @@ class HybridAssessmentEngine:
                             'searched_cell_line': effective_cell_line
                         }
 
-                    comprehensive_analysis = self.comprehensive_hpa_analysis(
-                        gene_name, effective_cell_line, hpa_data if hpa_data else None
-                    )
-                    result['comprehensive_hpa_analysis'] = comprehensive_analysis
+
             except Exception as e:
                 logger.error(f"HPA分析失败: {e}")
                 result['warnings'].append(f"HPA分析失败: {str(e)}")
@@ -4543,85 +3739,6 @@ class HybridAssessmentEngine:
         result['status'] = 'success' if not result['errors'] else 'partial'
         return result
 
-    # ==================== HPA分析方法（简化版）====================
-
-    def comprehensive_hpa_analysis(self, gene_name: str, cell_line: str, cached_hpa_data: Dict = None) -> Dict:
-        """HPA基础数据分析：蛋白定位、表达量、内参推荐"""
-        result = {
-            'gene': gene_name,
-            'cell_line': cell_line,
-            'protein_localization': {},
-            'gene_expression': {},
-            'reference_genes': {},
-            'antibody_strategy': {}
-        }
-
-        # 1. 获取蛋白定位信息
-        result['protein_localization'] = self.hpa.get_protein_localization(gene_name)
-
-        # 2. 获取目的基因在指定细胞系的表达量
-        hpa_data = cached_hpa_data if cached_hpa_data else self.hpa.get_expression_data(gene_name, cell_line)
-        if hpa_data:
-            result['gene_expression'] = {
-                'rna_level': hpa_data.get('rna_level', 'N/A'),
-                'protein_level': hpa_data.get('protein_level', 'N/A'),
-                'reliability': hpa_data.get('reliability', 'N/A'),
-                'ensembl_id': hpa_data.get('ensembl_id', 'N/A')
-            }
-
-        # 3. 根据蛋白定位推荐内参基因
-        location_types = result['protein_localization'].get('location_types', ['general'])
-        # TODO: 需要获取目的蛋白的分子量来推荐内参，这里暂时用0表示未知
-        target_mw = 0  # 可以从UniProt等数据库获取
-        result['reference_genes'] = self.hpa.get_reference_genes_for_location(
-            location_types, cell_line, target_mw
-        )
-
-        # 4. 抗体验证策略（WB和流式）
-        result['antibody_strategy'] = self._get_antibody_strategy(gene_name, result['protein_localization'])
-
-        return result
-
-    def _get_antibody_strategy(self, gene_name: str, localization: Dict) -> Dict:
-        """生成抗体验证策略（WB和流式）"""
-        loc_types = localization.get('location_types', [])
-        main_loc = localization.get('main_localization', 'Unknown')
-
-        # 根据定位推荐验证方法
-        wb_notes = []
-        flow_notes = []
-
-        if 'membrane' in loc_types:
-            wb_notes.append("膜蛋白，建议提取总蛋白或使用膜蛋白提取试剂盒")
-            wb_notes.append("转膜条件：建议0.45μm PVDF膜，恒流300mA 90min")
-            flow_notes.append("适合流式检测（细胞表面标记）")
-            flow_notes.append("建议活细胞染色或固定后染色")
-        elif 'nucleus' in loc_types:
-            wb_notes.append("核蛋白，需要核蛋白提取或RIPA强裂解液")
-            wb_notes.append("注意区分核质和核膜定位")
-        elif 'cytoplasm' in loc_types:
-            wb_notes.append("胞质蛋白，常规RIPA提取即可")
-            flow_notes.append("需要固定破膜后才能进行流式检测")
-        elif 'mitochondria' in loc_types:
-            wb_notes.append("线粒体蛋白，建议提取线粒体组分")
-            wb_notes.append("注意与核编码蛋白区分")
-
-        if not flow_notes:
-            flow_notes.append("该蛋白定位可能不适合常规流式检测")
-            flow_notes.append("如需流式检测，建议考虑过表达带标签的蛋白")
-
-        return {
-            'gene': gene_name,
-            'main_localization': main_loc,
-            'wb_antibody': {
-                'recommendations': wb_notes if wb_notes else ["常规WB条件即可"],
-                'notes': f"针对{main_loc}定位的WB建议"
-            },
-            'flow_cytometry': {
-                'recommendations': flow_notes,
-                'notes': f"针对{main_loc}定位的流式建议"
-            }
-        }
 
 # ==================== UI渲染（完整版） ====================
 def render_sidebar():
@@ -5053,124 +4170,135 @@ def render_results(result: Dict):
         else:
             st.info("未获取到基因功能分析数据")
 
-    # ==================== HPA基础数据（合并蛋白定位、表达量、内参推荐）====================
+    # ==================== HPA基因信息（7类信息展示）====================
     with tabs[2]:
-        st.markdown("### 🧬 HPA基础数据")
+        st.markdown("### 🧬 HPA基因信息")
         st.caption("数据来源: Human Protein Atlas (HPA)")
-
-        hpa_analysis = result.get('comprehensive_hpa_analysis', {})
-
-        if hpa_analysis and isinstance(hpa_analysis, dict):
-            # 1. 蛋白定位信息
-            loc_data = hpa_analysis.get('protein_localization', {})
-            if loc_data and 'error' not in loc_data:
-                st.subheader("📍 蛋白亚细胞定位")
-                main_loc = loc_data.get('main_localization', 'Unknown')
-                st.success(f"**主要定位**: {main_loc}")
-
-                loc_types = loc_data.get('location_types', [])
-                if loc_types:
-                    st.write("**定位类别**: " + ", ".join(loc_types))
-
-                add_loc = loc_data.get('additional_localization', '')
-                if add_loc:
-                    st.caption(f"附加定位: {add_loc}")
-
-            st.divider()
-
-            # 2. 目的基因表达量
-            expr_data = hpa_analysis.get('gene_expression', {})
-            if expr_data:
-                st.subheader("📊 目的基因表达量")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("RNA水平", expr_data.get('rna_level', 'N/A'))
-                with col2:
-                    st.metric("蛋白水平", expr_data.get('protein_level', 'N/A'))
-                with col3:
-                    st.metric("可靠性", expr_data.get('reliability', 'N/A'))
-
-            st.divider()
-
-            # 3. 内参基因推荐（基于定位和分子量）
-            ref_data = hpa_analysis.get('reference_genes', {})
-            if ref_data and 'error' not in ref_data:
-                st.subheader("🎯 内参基因推荐")
-
-                loc_types = ref_data.get('location_types', ['general'])
-                st.write(f"**基于定位**: {', '.join(loc_types)}")
-
-                ref_genes = ref_data.get('reference_genes', [])
-                if ref_genes:
-                    # 分离推荐和非推荐（基于分子量差异）
-                    recommended = [r for r in ref_genes if r.get('recommended')][:3]
-                    others = [r for r in ref_genes if not r.get('recommended')][:5]
-
-                    if recommended:
-                        st.markdown("**✅ 推荐内参（分子量差异>20kDa）**")
-                        rec_df = pd.DataFrame([
-                            {
-                                '基因': r['gene'],
-                                '蛋白名称': r['name'],
-                                '分子量(kDa)': r['mw_kda'],
-                                'RNA(nTPM)': f"{r['rna_ntpm']:.1f}",
-                                '定位': r['location']
-                            } for r in recommended
-                        ])
-                        st.table(rec_df)
-
-                    if others:
-                        with st.expander("其他可用内参"):
-                            other_df = pd.DataFrame([
-                                {
-                                    '基因': r['gene'],
-                                    '分子量(kDa)': r['mw_kda'],
-                                    'RNA(nTPM)': f"{r['rna_ntpm']:.1f}"
-                                } for r in others
-                            ])
-                            st.table(other_df)
-
-                    if ref_data.get('recommendation'):
-                        st.info(f"**建议**: {ref_data['recommendation']}")
+        
+        # 获取基因详情
+        gene_details = None
+        if result.get('gene_name'):
+            try:
+                hpa_service = st.session_state.get('hpa_gene_service')
+                if hpa_service:
+                    gene_details = hpa_service.get_gene_details(result['gene_name'])
+            except Exception as e:
+                logger.warning(f"获取HPA基因详情失败: {e}")
+        
+        if gene_details:
+            data = gene_details
+            
+            # 1. Ensembl ID
+            with st.container():
+                st.subheader("🔗 Ensembl ID")
+                ensembl_id = data.get('ensembl_id', '')
+                ensembl_url = data.get('ensembl_url', '')
+                if ensembl_id:
+                    st.markdown(f"**{ensembl_id}** [→ Ensembl]({ensembl_url})")
                 else:
-                    st.warning("未找到该细胞系中表达稳定的内参基因")
-            else:
-                st.info("未获取到内参基因推荐数据")
+                    st.write("N/A")
+            st.divider()
+            
+            # 2. Uniprot ID
+            with st.container():
+                st.subheader("🔗 Uniprot ID")
+                uniprot_id = data.get('uniprot_id', '')
+                uniprot_url = data.get('uniprot_url', '')
+                if uniprot_id:
+                    st.markdown(f"**{uniprot_id}** [→ Uniprot]({uniprot_url})")
+                else:
+                    st.write("N/A")
+            st.divider()
+            
+            # 3. 基因组位置
+            with st.container():
+                st.subheader("🧬 基因组位置")
+                genome_loc = data.get('genome_location', '')
+                chromosome = data.get('chromosome', '')
+                if genome_loc:
+                    ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_chrom={chromosome}&hgg_gene={data.get('ensembl_id', '')}"
+                    st.markdown(f"**{genome_loc}** [→ UCSC]({ucsc_url})")
+                else:
+                    st.write("N/A")
+            st.divider()
+            
+            # 4. 蛋白定位与功能
+            with st.container():
+                st.subheader("🎯 蛋白定位与功能")
+                loc = data.get('protein_localization', {})
+                func = data.get('protein_function', {})
+                
+                if loc.get('subcellular_main'):
+                    st.write(f"**主要定位**: {loc['subcellular_main']}")
+                if loc.get('subcellular_additional'):
+                    st.write(f"**附加定位**: {loc['subcellular_additional']}")
+                if loc.get('secretome_location'):
+                    st.write(f"**分泌位置**: {loc['secretome_location']}")
+                if loc.get('secretome_function'):
+                    st.write(f"**分泌功能**: {loc['secretome_function']}")
+                if func.get('biological_process'):
+                    st.write(f"**生物过程**: {func['biological_process']}")
+                if func.get('molecular_function'):
+                    st.write(f"**分子功能**: {func['molecular_function']}")
+                if func.get('disease_involvement'):
+                    st.write(f"**疾病相关**: {func['disease_involvement']}")
+            st.divider()
+            
+            # 5. RNA表达与定位
+            with st.container():
+                st.subheader("📊 RNA表达与定位")
+                rna = data.get('rna_expression', {})
+                if rna.get('tissue_specificity'):
+                    st.write(f"**组织特异性**: {rna['tissue_specificity']}")
+                if rna.get('tissue_specific_ntpm'):
+                    st.write(f"**组织特异性nTPM**: {rna['tissue_specific_ntpm']}")
+            st.divider()
+            
+            # 6. 抗体推荐
+            with st.container():
+                st.subheader("🧪 抗体推荐")
+                antibody = data.get('antibody', {})
+                if antibody.get('name'):
+                    hpa_url = antibody.get('hpa_gene_url', '')
+                    st.markdown(f"**{antibody['name']}** [→ HPA]({hpa_url})")
+                else:
+                    st.write("N/A")
+            st.divider()
+            
+            # 7. RNA在四种样本中的表达
+            with st.container():
+                st.subheader("📈 RNA分布（4种样本类型）")
+                dist = data.get('rna_distribution', {})
+                
+                # 组织
+                tissue = dist.get('tissue', {})
+                if tissue.get('specificity'):
+                    st.write(f"**组织**: {tissue['specificity']} ({tissue.get('specific_ntpm', 'N/A')})")
+                
+                # 单细胞
+                sc = dist.get('single_cell', {})
+                if sc.get('specificity'):
+                    st.write(f"**单细胞**: {sc['specificity']} ({sc.get('specific_ncpm', 'N/A')})")
+                
+                # 肿瘤
+                cancer = dist.get('cancer', {})
+                if cancer.get('specificity'):
+                    st.write(f"**肿瘤**: {cancer['specificity']} ({cancer.get('specific_ptpm', 'N/A')})")
+                
+                # 血液
+                blood = dist.get('blood', {})
+                if blood.get('specificity'):
+                    st.write(f"**血液**: {blood['specificity']} ({blood.get('specific_ntpm', 'N/A')})")
         else:
-            st.info("未获取到HPA分析数据（请确保选择人类物种并输入有效细胞系）")
+            st.info("未获取到HPA基因信息（请确保输入有效基因名称）")
 
-    # ==================== 抗体验证策略（WB和流式）====================
+    # ==================== 抗体验证策略（占位，后续移除）====================
     with tabs[3]:
         st.markdown("### 🔬 抗体验证策略")
-
-        hpa_analysis = result.get('comprehensive_hpa_analysis', {})
-        antibody_data = hpa_analysis.get('antibody_strategy', {}) if hpa_analysis else {}
-
-        if antibody_data and 'error' not in antibody_data:
-            main_loc = antibody_data.get('main_localization', 'Unknown')
-            st.success(f"目标蛋白定位: **{main_loc}**")
-
-            # WB抗体建议
-            wb_data = antibody_data.get('wb_antibody', {})
-            if wb_data:
-                st.subheader("🧪 Western Blot 抗体验证")
-                st.write(f"**说明**: {wb_data.get('notes', '')}")
-                for rec in wb_data.get('recommendations', []):
-                    st.markdown(f"- {rec}")
-
-            st.divider()
-
-            # 流式抗体建议
-            flow_data = antibody_data.get('flow_cytometry', {})
-            if flow_data:
-                st.subheader("🌊 流式细胞术 (Flow Cytometry)")
-                st.write(f"**说明**: {flow_data.get('notes', '')}")
-                for rec in flow_data.get('recommendations', []):
-                    st.markdown(f"- {rec}")
-        else:
-            st.info("未获取到抗体验证策略数据")
+        st.info("此功能已移至HPA基因信息标签页")
 
     # ==================== 细胞系评估 ====================
+
     with tabs[4]:
         st.markdown("### 细胞系评估数据")
         cell_data = result.get('cell_assessment')
