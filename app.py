@@ -3862,12 +3862,13 @@ class GeneAutocompleteService:
             return []
 
 class GeneInputComponent:
-    def __init__(self, gene_service: GeneAutocompleteService, hpa_gene_service: HPAGeneAutocompleteService = None, hpa_detail_service: HPAGeneDetailService = None):
-        self.gene_service = gene_service
+    """基因输入组件 - 完全基于HPA数据包（抛弃NCBI自动补全）"""
+    
+    def __init__(self, hpa_gene_service: HPAGeneAutocompleteService = None, hpa_detail_service: HPAGeneDetailService = None):
         self.hpa_gene_service = hpa_gene_service
         self.hpa_detail_service = hpa_detail_service
 
-    def render(self, organism: str, key_prefix: str = "gene") -> Optional[str]:
+    def render(self, organism: str = "human", key_prefix: str = "gene") -> Optional[str]:
         input_key = f"{key_prefix}_input"
         selected_key = f"{key_prefix}_selected"
         suggestions_key = f"{key_prefix}_suggestions"
@@ -3885,13 +3886,14 @@ class GeneInputComponent:
         if hpa_info_key not in st.session_state:
             st.session_state[hpa_info_key] = None
 
-        # 判断使用哪种自动补全
-        use_hpa = (organism == "human" and self.hpa_gene_service is not None)
-        input_label = "基因名（HPA自动补全，输入2个字符以上显示建议）" if use_hpa else "基因名（支持自动补全，输入2个字符以上显示建议）"
+        # 统一使用HPA数据包进行基因自动补全
+        hpa_available = (self.hpa_gene_service is not None)
+        input_label = "基因名（HPA数据自动补全，输入2个字符以上显示建议）"
 
         user_input = st.text_input(
             input_label,
             value=st.session_state[input_key],
+            placeholder="例如：TP53, EGFR, GAPDH...",
             key=f"{key_prefix}_text_widget"
         )
 
@@ -3908,8 +3910,8 @@ class GeneInputComponent:
         if len(user_input) >= 2 and not st.session_state[selected_key]:
             last_query = st.session_state.get(last_query_key, "")
             if user_input != last_query:
-                if use_hpa:
-                    # 使用HPA自动补全
+                if hpa_available:
+                    # 使用HPA自动补全（基于Gene synonym列）
                     hpa_suggestions = self.hpa_gene_service.get_suggestions(user_input, limit=8)
                     suggestions = []
                     for sug in hpa_suggestions:
@@ -3922,11 +3924,12 @@ class GeneInputComponent:
                             "type": "protein-coding",
                             "source": "HPA",
                             "match_type": sug.get('match_type', ''),
-                            "matched_name": sug.get('matched_name', '')
+                            "matched_name": sug.get('matched_name', ''),
+                            "name_type": sug.get('name_type', '')  # primary或synonym
                         })
                 else:
-                    # 使用NCBI自动补全
-                    suggestions = self.gene_service.get_suggestions(user_input, organism)
+                    # HPA服务不可用时的降级处理
+                    suggestions = []
                 
                 st.session_state[suggestions_key] = suggestions
                 st.session_state[last_query_key] = user_input
@@ -3934,33 +3937,35 @@ class GeneInputComponent:
 
         suggestions = st.session_state.get(suggestions_key, [])
         if suggestions and not st.session_state[selected_key]:
-            st.caption(f"💡 匹配到 {len(suggestions)} 个建议：")
+            st.caption(f"💡 HPA基因匹配 ({len(suggestions)}个建议)：")
             cols = st.columns(min(len(suggestions), 4))
             for i, gene in enumerate(suggestions):
                 with cols[i % 4]:
                     display_text = f"{gene['symbol']}"
                     match_type = gene.get('match_type', '')
                     matched_name = gene.get('matched_name', '')
+                    name_type = gene.get('name_type', '')
                     
-                    # HPA匹配显示匹配类型
-                    if gene.get('source') == 'HPA' and match_type:
-                        icons = {'exact': '✓', 'prefix': '↳', 'substring': '~', 'fuzzy': '≈'}
-                        icon = icons.get(match_type, '•')
-                        if matched_name and matched_name != gene['symbol']:
-                            display_text = f"{icon} {gene['symbol']} ({matched_name})"
-                        else:
-                            display_text = f"{icon} {gene['symbol']}"
+                    # 显示匹配类型图标
+                    icons = {'exact': '✓', 'prefix': '↳', 'substring': '~', 'fuzzy': '≈'}
+                    icon = icons.get(match_type, '•')
+                    
+                    # 如果匹配的是synonym，显示原始匹配名
+                    if name_type == 'synonym' and matched_name and matched_name.upper() != gene['symbol'].upper():
+                        display_text = f"{icon} {gene['symbol']} (via {matched_name})"
+                    else:
+                        display_text = f"{icon} {gene['symbol']}"
                     
                     btn_type = "primary" if match_type == 'exact' else "secondary"
-                    help_text = f"匹配类型: {match_type}" if match_type else ""
+                    help_text = f"匹配: {matched_name} ({match_type})" if matched_name else f"匹配类型: {match_type}"
                     
                     if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True, type=btn_type, help=help_text):
                         st.session_state[selected_key] = gene['symbol']
                         st.session_state[input_key] = gene['symbol']
                         st.session_state[f"{key_prefix}_info"] = gene
                         
-                        # 如果是HPA基因，获取详细信息
-                        if use_hpa and self.hpa_detail_service:
+                        # 获取HPA详细信息
+                        if self.hpa_detail_service:
                             hpa_details = self.hpa_detail_service.get_gene_details(gene['symbol'])
                             st.session_state[hpa_info_key] = hpa_details
                         
@@ -3970,17 +3975,20 @@ class GeneInputComponent:
             gene_symbol = st.session_state[selected_key]
             
             # 如果还没有HPA详情，获取它
-            if use_hpa and self.hpa_detail_service and not st.session_state.get(hpa_info_key):
+            if self.hpa_detail_service and not st.session_state.get(hpa_info_key):
                 hpa_details = self.hpa_detail_service.get_gene_details(gene_symbol)
                 st.session_state[hpa_info_key] = hpa_details
             
             # 显示选择信息
             if f"{key_prefix}_info" in st.session_state:
                 gene_info = st.session_state[f"{key_prefix}_info"]
-                st.success(f"✓ 已选择: **{gene_info['symbol']}** | {gene_info.get('name', '')} | {gene_info.get('chromosome', '')}")
+                match_info = ""
+                if gene_info.get('name_type') == 'synonym' and gene_info.get('matched_name'):
+                    match_info = f" (匹配自: {gene_info['matched_name']})"
+                st.success(f"✓ 已选择HPA基因: **{gene_info['symbol']}**{match_info}")
             
             # 显示HPA详细信息面板
-            if use_hpa and st.session_state.get(hpa_info_key):
+            if st.session_state.get(hpa_info_key):
                 self._render_hpa_gene_info(st.session_state[hpa_info_key])
             
             return gene_symbol
@@ -4687,9 +4695,9 @@ def render_main_panel():
         hpa_gene_service = st.session_state.get('hpa_gene_service')
         hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
         
-        gene_service = GeneAutocompleteService()
-        # 传递HPA服务给GeneInputComponent（仅human物种会使用）
-        gene_component = GeneInputComponent(gene_service, hpa_gene_service, hpa_detail_service)
+        gene_service = GeneAutocompleteService()  # 保留用于其他可能的用途
+        # 基因输入完全基于HPA数据包（抛弃NCBI自动补全）
+        gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
         gene = gene_component.render(organism, key_prefix="main_gene")
 
     with col2:
