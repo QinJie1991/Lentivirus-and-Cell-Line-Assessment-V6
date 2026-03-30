@@ -4465,15 +4465,23 @@ def render_results(result: Dict):
         st.markdown("### 🧬 HPA基因信息")
         st.caption("数据来源: Human Protein Atlas (HPA)")
         
-        # 获取基因详情
+        # 获取基因详情 - 使用 hpa_detail_service
         gene_details = None
-        if result.get('gene_name'):
+        gene_name = result.get('gene') or result.get('gene_name')
+        if gene_name:
             try:
-                hpa_service = st.session_state.get('hpa_gene_service')
-                if hpa_service:
-                    gene_details = hpa_service.get_gene_details(result['gene_name'])
+                # 优先使用 hpa_detail_service
+                hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
+                if hpa_detail_service:
+                    gene_details = hpa_detail_service.get_gene_details(gene_name)
+                else:
+                    # 备选：尝试从 hpa_gene_service 获取
+                    hpa_service = st.session_state.get('hpa_gene_service')
+                    if hpa_service and hasattr(hpa_service, 'get_gene_details'):
+                        gene_details = hpa_service.get_gene_details(gene_name)
             except Exception as e:
                 logger.warning(f"获取HPA基因详情失败: {e}")
+                st.warning(f"获取HPA基因详情失败: {e}")
         
         if gene_details:
             data = gene_details
@@ -4483,8 +4491,10 @@ def render_results(result: Dict):
                 st.subheader("🔗 Ensembl ID")
                 ensembl_id = data.get('ensembl_id', '')
                 ensembl_url = data.get('ensembl_url', '')
-                if ensembl_id:
-                    st.markdown(f"**{ensembl_id}** [→ Ensembl]({ensembl_url})")
+                if ensembl_id and ensembl_url:
+                    st.markdown(f"[{ensembl_id}]({ensembl_url})")
+                elif ensembl_id:
+                    st.write(ensembl_id)
                 else:
                     st.write("N/A")
             st.divider()
@@ -4494,8 +4504,10 @@ def render_results(result: Dict):
                 st.subheader("🔗 Uniprot ID")
                 uniprot_id = data.get('uniprot_id', '')
                 uniprot_url = data.get('uniprot_url', '')
-                if uniprot_id:
-                    st.markdown(f"**{uniprot_id}** [→ Uniprot]({uniprot_url})")
+                if uniprot_id and uniprot_url:
+                    st.markdown(f"[{uniprot_id}]({uniprot_url})")
+                elif uniprot_id:
+                    st.write(uniprot_id)
                 else:
                     st.write("N/A")
             st.divider()
@@ -4505,9 +4517,18 @@ def render_results(result: Dict):
                 st.subheader("🧬 基因组位置")
                 genome_loc = data.get('genome_location', '')
                 chromosome = data.get('chromosome', '')
+                position = data.get('position', '')
+                ensembl_id = data.get('ensembl_id', '')
                 if genome_loc:
-                    ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_chrom={chromosome}&hgg_gene={data.get('ensembl_id', '')}"
-                    st.markdown(f"**{genome_loc}** [→ UCSC]({ucsc_url})")
+                    # UCSC 链接使用染色体和位置
+                    if chromosome and position:
+                        # 解析位置，获取起始位置
+                        pos_parts = position.replace(',', '').split('-')
+                        start_pos = pos_parts[0] if pos_parts else position.replace(',', '')
+                        ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg38&position=chr{chromosome}:{start_pos}"
+                    else:
+                        ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_gene={ensembl_id}"
+                    st.markdown(f"`{genome_loc}` [→ UCSC]({ucsc_url})")
                 else:
                     st.write("N/A")
             st.divider()
@@ -4549,36 +4570,68 @@ def render_results(result: Dict):
                 st.subheader("🧪 抗体推荐")
                 antibody = data.get('antibody', {})
                 if antibody.get('name'):
-                    hpa_url = antibody.get('hpa_gene_url', '')
-                    st.markdown(f"**{antibody['name']}** [→ HPA]({hpa_url})")
+                    antibody_name = antibody['name']
+                    # 优先使用搜索该抗体的链接
+                    hpa_url = antibody.get('hpa_search_url') or antibody.get('hpa_gene_url', '')
+                    if hpa_url:
+                        st.markdown(f"[{antibody_name}]({hpa_url})")
+                    else:
+                        st.write(antibody_name)
                 else:
                     st.write("N/A")
             st.divider()
             
             # 7. RNA在四种样本中的表达
             with st.container():
-                st.subheader("📈 RNA分布（4种样本类型）")
+                st.subheader("📈 RNA在不同样本中的表达")
                 dist = data.get('rna_distribution', {})
+                
+                # 使用4列布局展示四组数据
+                rna_cols = st.columns(4)
                 
                 # 组织
                 tissue = dist.get('tissue', {})
-                if tissue.get('specificity'):
-                    st.write(f"**组织**: {tissue['specificity']} ({tissue.get('specific_ntpm', 'N/A')})")
+                with rna_cols[0]:
+                    st.markdown("**🧬 组织**")
+                    if tissue.get('specificity'):
+                        st.write(f"{tissue['specificity']}")
+                        if tissue.get('specific_ntpm'):
+                            st.caption(f"nTPM: {tissue['specific_ntpm']}")
+                    else:
+                        st.write("N/A")
                 
                 # 单细胞
                 sc = dist.get('single_cell', {})
-                if sc.get('specificity'):
-                    st.write(f"**单细胞**: {sc['specificity']} ({sc.get('specific_ncpm', 'N/A')})")
+                with rna_cols[1]:
+                    st.markdown("**🔬 单细胞**")
+                    if sc.get('specificity'):
+                        st.write(f"{sc['specificity']}")
+                        if sc.get('specific_ncpm'):
+                            st.caption(f"nCPM: {sc['specific_ncpm']}")
+                    else:
+                        st.write("N/A")
                 
                 # 肿瘤
                 cancer = dist.get('cancer', {})
-                if cancer.get('specificity'):
-                    st.write(f"**肿瘤**: {cancer['specificity']} ({cancer.get('specific_ptpm', 'N/A')})")
+                with rna_cols[2]:
+                    st.markdown("**⚕️ 肿瘤**")
+                    if cancer.get('specificity'):
+                        st.write(f"{cancer['specificity']}")
+                        if cancer.get('specific_ptpm'):
+                            st.caption(f"pTPM: {cancer['specific_ptpm']}")
+                    else:
+                        st.write("N/A")
                 
-                # 血液
+                # 血细胞
                 blood = dist.get('blood', {})
-                if blood.get('specificity'):
-                    st.write(f"**血液**: {blood['specificity']} ({blood.get('specific_ntpm', 'N/A')})")
+                with rna_cols[3]:
+                    st.markdown("**🩸 血细胞**")
+                    if blood.get('specificity'):
+                        st.write(f"{blood['specificity']}")
+                        if blood.get('specific_ntpm'):
+                            st.caption(f"nTPM: {blood['specific_ntpm']}")
+                    else:
+                        st.write("N/A")
         else:
             st.info("未获取到HPA基因信息（请确保输入有效基因名称）")
 
