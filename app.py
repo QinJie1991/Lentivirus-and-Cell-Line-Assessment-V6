@@ -1608,6 +1608,10 @@ class HPAGeneAutocompleteService:
                     ensembl_id = row.get('Gene', '').strip()
                     synonyms_str = row.get('Gene synonym', '').strip()
                     
+                    # 如果Gene name为空，尝试使用Gene列（Ensembl ID）作为主键
+                    if not gene_symbol and ensembl_id:
+                        gene_symbol = ensembl_id
+                    
                     if not gene_symbol:
                         continue
                     
@@ -1624,8 +1628,13 @@ class HPAGeneAutocompleteService:
                         'description': row.get('Gene description', '')
                     }
                     
-                    # 索引基因symbol
-                    self._add_to_index(gene_symbol, gene_symbol, ensembl_id, 'primary')
+                    # 索引Gene name列（主要基因名）
+                    if gene_symbol and gene_symbol != ensembl_id:
+                        self._add_to_index(gene_symbol, gene_symbol, ensembl_id, 'primary')
+                    
+                    # 索引Gene列（Ensembl ID）
+                    if ensembl_id:
+                        self._add_to_index(ensembl_id, gene_symbol, ensembl_id, 'ensembl')
                     
                     # 索引所有synonyms
                     if synonyms_str:
@@ -1653,6 +1662,17 @@ class HPAGeneAutocompleteService:
         if not name:
             return ""
         return name.upper().replace('-', '').replace(' ', '').replace('_', '')
+    
+    def rebuild_index(self) -> bool:
+        """重新构建搜索索引（数据下载后调用）"""
+        self.search_index = {}
+        self.gene_data_cache = {}
+        self._build_search_index()
+        return len(self.search_index) > 0
+    
+    def is_index_ready(self) -> bool:
+        """检查索引是否已构建"""
+        return len(self.search_index) > 0
     
     def get_suggestions(self, query: str, limit: int = 8) -> List[Dict]:
         """
@@ -3087,7 +3107,37 @@ class GeneInputComponent:
 
         # 统一使用HPA数据包进行基因自动补全
         hpa_available = (self.hpa_gene_service is not None)
+        
+        # 检查HPA数据文件是否存在
+        hpa_data_ready = False
+        if hpa_available and self.hpa_gene_service:
+            # 检查搜索索引是否已构建（即数据文件是否存在）
+            if hasattr(self.hpa_gene_service, 'search_index') and self.hpa_gene_service.search_index:
+                hpa_data_ready = True
+        
         input_label = "基因名（HPA数据自动补全，输入2个字符以上显示建议）"
+        
+        # 如果HPA数据未就绪，显示警告并尝试下载
+        if hpa_available and not hpa_data_ready:
+            st.warning("⚠️ HPA基因数据尚未下载。首次使用需要下载约200MB数据，请稍候...")
+            # 尝试触发下载
+            try:
+                hpa_manager = getattr(self.hpa_gene_service, 'hpa_manager', None)
+                if hpa_manager and hasattr(hpa_manager, 'check_and_download'):
+                    with st.spinner("正在下载HPA数据（约200MB）..."):
+                        hpa_manager.check_and_download()
+                    # 下载完成后重建索引
+                    if hasattr(self.hpa_gene_service, 'rebuild_index'):
+                        with st.spinner("正在构建基因索引..."):
+                            success = self.hpa_gene_service.rebuild_index()
+                            if success:
+                                st.success(f"✅ 索引构建完成！共 {len(self.hpa_gene_service.search_index)} 个基因名称")
+                                hpa_data_ready = True
+                            else:
+                                st.error("❌ 索引构建失败")
+            except Exception as e:
+                logger.error(f"HPA数据下载失败: {e}")
+                st.error(f"数据下载失败: {e}")
 
         user_input = st.text_input(
             input_label,
@@ -3109,7 +3159,7 @@ class GeneInputComponent:
         if len(user_input) >= 2 and not st.session_state[selected_key]:
             last_query = st.session_state.get(last_query_key, "")
             if user_input != last_query:
-                if hpa_available:
+                if hpa_available and hpa_data_ready:
                     # 使用HPA自动补全（基于Gene synonym列）
                     hpa_suggestions = self.hpa_gene_service.get_suggestions(user_input, limit=8)
                     suggestions = []
@@ -4025,10 +4075,9 @@ def render_results(result: Dict):
 
     # 修改后的标签页列表
     tabs = st.tabs([
-        "硬性规则检查",
+        "慢病毒包装可行性评估",
         "基因功能分析",
-        "HPA基础数据",     # 蛋白定位、表达量、内参推荐
-        "抗体验证策略",    # WB和流式抗体
+        "HPA基因信息",     # 7类HPA基因信息
         "细胞系评估",
         "序列设计",
         "转录本选择"
@@ -4292,14 +4341,9 @@ def render_results(result: Dict):
         else:
             st.info("未获取到HPA基因信息（请确保输入有效基因名称）")
 
-    # ==================== 抗体验证策略（占位，后续移除）====================
-    with tabs[3]:
-        st.markdown("### 🔬 抗体验证策略")
-        st.info("此功能已移至HPA基因信息标签页")
-
     # ==================== 细胞系评估 ====================
 
-    with tabs[4]:
+    with tabs[3]:
         st.markdown("### 细胞系评估数据")
         cell_data = result.get('cell_assessment')
         if cell_data and isinstance(cell_data, dict):
@@ -4414,7 +4458,7 @@ def render_results(result: Dict):
             st.info("未获取到细胞系评估数据")
 
     # ==================== 序列设计 ====================
-    with tabs[5]:
+    with tabs[4]:
         st.markdown("### 序列设计参考")
         seq_data = result.get('sequence_designs')
         if seq_data and isinstance(seq_data, dict):
@@ -4555,7 +4599,7 @@ def render_results(result: Dict):
             st.info("敲低和敲除实验可查看序列设计建议（从文献检索已报道的sgRNA）")
 
     # ==================== 转录本选择 ====================
-    with tabs[6]:
+    with tabs[5]:
         st.markdown("### 转录本选择详情（多数据库交叉验证）")
         tx_data = result.get('transcript_selection', {})
         if tx_data and isinstance(tx_data, dict):
