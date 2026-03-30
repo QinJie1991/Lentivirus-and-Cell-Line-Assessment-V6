@@ -1574,7 +1574,6 @@ class HPADataManager:
             logger.error(f"HPA download error: {e}", exc_info=True)
             st.error(f"HPA数据下载失败: {str(e)}")
 
-
 # ==================== HPA基因自动补全服务（基于Gene synonym）====================
 class HPAGeneAutocompleteService:
     """基于HPA proteinatlas.tsv的Gene synonym列的基因自动补全服务"""
@@ -1980,6 +1979,14 @@ class NCBIClient:
             response = requests.get(url, params=params, timeout=30)
             response.raise_for_status()
             return response.json() if retmode == "json" else response.text
+        except requests.exceptions.HTTPError as e:
+            logger.error(f"NCBI HTTP error: {e}, Status: {response.status_code}")
+            # 检查是否是认证问题
+            if response.status_code == 403:
+                logger.error("NCBI API 访问被拒绝，请检查 email 和 API key 配置")
+            elif response.status_code == 429:
+                logger.error("NCBI API 请求过于频繁，请添加 API key 以提高限额")
+            return None
         except Exception as e:
             logger.error(f"NCBI request failed: {e}")
             return None
@@ -2027,11 +2034,14 @@ class NCBIClient:
             ids = []
             debug_info = []
             
-            # 策略1：使用Accession限定搜索NM/XM
+            # 策略列表：从最精确到最宽泛
             search_terms = [
-                f"{gene_id}[GeneID] AND (NM_[Accession] OR XM_[Accession])",
+                # 策略1：使用GeneID和RefSeq过滤
                 f"{gene_id}[GeneID] AND refseq[Filter]",
-                f"{gene_id}[GeneID] AND (mRNA[Title] OR transcript[Title])",
+                # 策略2：直接GeneID搜索（不加限制，获取所有相关核酸序列）
+                f"{gene_id}[GeneID]",
+                # 策略3：尝试不同格式的GeneID
+                f"{gene_id}[uid]",
             ]
             
             for term in search_terms:
@@ -2039,18 +2049,21 @@ class NCBIClient:
                     'db': 'nuccore',
                     'term': term,
                     'retmode': 'json',
-                    'retmax': 20,
+                    'retmax': 50,  # 增加返回数量
                     'sort': 'accession'
                 }
                 result = self._make_request('esearch.fcgi', search_params)
                 if result:
                     term_ids = result.get('esearchresult', {}).get('idlist', [])
                     debug_info.append(f"策略 '{term[:40]}...': 找到 {len(term_ids)} 个ID")
-                    if term_ids and not ids:
-                        ids = term_ids
-                        logger.info(f"找到 {len(ids)} 个转录本 (查询: {term[:50]}...)")
+                    if term_ids:
+                        ids.extend(term_ids)
+                        logger.info(f"找到 {len(term_ids)} 个转录本 (查询: {term[:50]}...)")
                 else:
                     debug_info.append(f"策略 '{term[:40]}...': 请求失败")
+            
+            # 去重
+            ids = list(dict.fromkeys(ids))  # 保持顺序去重
             
             if not ids:
                 logger.warning(f"基因ID {gene_id} 未找到任何转录本")
@@ -2061,41 +2074,57 @@ class NCBIClient:
             # 步骤2：获取详细信息
             summary_params = {
                 'db': 'nuccore',
-                'id': ','.join(ids),
+                'id': ','.join(ids[:20]),  # 限制数量避免请求过大
                 'retmode': 'json'
             }
             summary_result = self._make_request('esummary.fcgi', summary_params)
             if not summary_result:
+                logger.warning("NCBI esummary 请求失败")
                 return []
 
             docs = summary_result.get('result', {})
             transcripts = []
-            for uid in ids:
+            for uid in ids[:20]:  # 限制处理数量
                 try:
-                    doc = docs.get(uid, {})
+                    doc = docs.get(str(uid), {})
                     acc = doc.get('accessionversion', '')
                     slen = doc.get('slen', 0)
+                    title = str(doc.get('title', ''))
 
-                    if not acc or not (acc.startswith('NM_') or acc.startswith('XM_')):
+                    # 更宽松的筛选：包含 RefSeq mRNA 或 title 包含 gene 关键词
+                    is_refseq = acc.startswith('NM_') or acc.startswith('XM_') or acc.startswith('NR_')
+                    is_mrna = 'mRNA' in title or 'transcript' in title.lower()
+                    
+                    if not acc:
                         continue
+                        
+                    # 优先保留 RefSeq 转录本
+                    if is_refseq or is_mrna:
+                        tx_type = 'NM' if acc.startswith('NM_') else ('XM' if acc.startswith('XM_') else 'OTHER')
+                        status = 'REVIEWED' if tx_type == 'NM' else ('PREDICTED' if tx_type == 'XM' else 'UNKNOWN')
 
-                    tx_type = 'NM' if acc.startswith('NM_') else 'XM'
-                    status = 'REVIEWED' if tx_type == 'NM' else 'PREDICTED'
-
-                    transcripts.append({
-                        'id': acc,
-                        'length': int(slen) if slen else 0,
-                        'type': tx_type,
-                        'status': status,
-                        'title': str(doc.get('title', ''))[:100]
-                    })
+                        transcripts.append({
+                            'id': acc,
+                            'length': int(slen) if slen else 0,
+                            'type': tx_type,
+                            'status': status,
+                            'title': title[:100]
+                        })
                 except Exception as e:
                     logger.warning(f"解析转录本 {uid} 失败: {e}")
                     continue
 
             # 排序：NM优先，然后按长度降序
-            transcripts.sort(key=lambda x: (0 if x['type'] == 'NM' else 1, -x['length']))
+            transcripts.sort(key=lambda x: (0 if x['type'] == 'NM' else (1 if x['type'] == 'XM' else 2), -x['length']))
+            
+            if not transcripts:
+                logger.warning(f"解析后未发现有效RefSeq转录本，原始ID数: {len(ids)}")
+                
             return transcripts
+
+        except Exception as e:
+            logger.error(f"获取转录本失败: {e}")
+            return []
 
         except Exception as e:
             logger.error(f"获取转录本失败: {e}")
@@ -2811,6 +2840,11 @@ class TranscriptSelector:
 
             if not all_transcripts:
                 st.warning("⚠️ 所有数据库均未返回有效转录本")
+                # 尝试使用备选方案：从NCBI gene信息创建基本转录本数据
+                fallback_tx = self._create_fallback_transcript(gene_name, gene_id)
+                if fallback_tx:
+                    st.info("ℹ️ 使用备选方案：基于NCBI Gene信息创建基础转录本记录")
+                    return fallback_tx
                 return {'error': '未找到任何转录本信息', 'fallback': True}
 
             # 过滤XM转录本，优先NM
@@ -2868,6 +2902,17 @@ class TranscriptSelector:
         try:
             # 使用NCBIClient的_fetch_transcripts方法来获取（已带重试）
             tx_list = self.ncbi._fetch_transcripts(gene_id)
+            
+            if not tx_list:
+                logger.warning(f"NCBI未返回基因ID {gene_id} 的任何转录本")
+                # 检查NCBI客户端配置
+                if not self.ncbi.email or '@' not in self.ncbi.email:
+                    st.warning("⚠️ NCBI Email 配置无效，请在侧边栏配置有效的邮箱地址")
+                elif not self.ncbi.api_key:
+                    st.info("💡 提示：配置 NCBI API Key 可提高请求成功率和限额")
+            else:
+                logger.info(f"NCBI返回 {len(tx_list)} 个转录本")
+            
             for tx in tx_list:
                 tx_id = tx['id']
                 transcripts[tx_id] = {
@@ -2877,7 +2922,9 @@ class TranscriptSelector:
                     'type': tx['type'],
                     'title': tx.get('title', '')
                 }
-            logger.info(f"NCBI RefSeq获取成功: {len(transcripts)}个转录本")
+            
+            if transcripts:
+                logger.info(f"NCBI RefSeq获取成功: {len(transcripts)}个转录本")
             
             # 显示调试信息
             if hasattr(self.ncbi, '_last_transcript_debug') and self.ncbi._last_transcript_debug:
@@ -2886,6 +2933,9 @@ class TranscriptSelector:
         except Exception as e:
             logger.error(f"NCBI RefSeq获取失败: {e}")
             st.warning(f"⚠️ NCBI RefSeq获取失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        return transcripts
         return transcripts
 
     def _fetch_ensembl(self, gene_name: str) -> Dict:
@@ -2978,6 +3028,76 @@ class TranscriptSelector:
                         merged[refseq_id]['length'] = ens_info['length']
 
         return merged
+
+    def _create_fallback_transcript(self, gene_name: str, gene_id: str) -> Optional[Dict]:
+        """当所有数据库都失败时，尝试从NCBI gene信息创建基础转录本记录"""
+        try:
+            # 尝试获取gene的summary信息，看是否有参考转录本
+            summary_params = {
+                'db': 'gene',
+                'id': gene_id,
+                'retmode': 'json'
+            }
+            result = self.ncbi._make_request('esummary.fcgi', summary_params)
+            if not result:
+                return None
+            
+            gene_data = result.get('result', {}).get(gene_id, {})
+            
+            # 尝试从genomic info获取一些信息
+            genomic_info = gene_data.get('genomicinfo', [])
+            chr_acc = ''
+            chr_start = 0
+            chr_stop = 0
+            if genomic_info and len(genomic_info) > 0:
+                chr_acc = genomic_info[0].get('chraccs', '')
+                chr_start = genomic_info[0].get('chrstart', 0)
+                chr_stop = genomic_info[0].get('chrstop', 0)
+            
+            # 创建基础转录本（模拟NM转录本）
+            estimated_length = abs(chr_stop - chr_start) if chr_stop > chr_start else 0
+            
+            # 如果长度太大（基因组长度），估计一个合理的CDS长度
+            if estimated_length > 10000:
+                estimated_length = 2000  # 默认值
+            
+            fallback_result = {
+                'gene': gene_name,
+                'gene_id': gene_id,
+                'selected_transcript': {
+                    'id': f'{gene_name}_UNKNOWN',
+                    'score': 0.1,
+                    'info': {
+                        'refseq_id': 'UNKNOWN',
+                        'length': estimated_length if estimated_length > 0 else 2000,
+                        'ncbi_status': 'ESTIMATED',
+                        'sources': ['FALLBACK_ESTIMATION']
+                    },
+                    'reasons': ['基于基因组信息估算（转录本数据库查询失败时的备选方案）']
+                },
+                'all_transcripts': [
+                    {
+                        'id': f'{gene_name}_UNKNOWN',
+                        'score': 0.1,
+                        'info': {
+                            'refseq_id': 'UNKNOWN',
+                            'length': estimated_length if estimated_length > 0 else 2000,
+                            'ncbi_status': 'ESTIMATED',
+                            'sources': ['FALLBACK_ESTIMATION']
+                        },
+                        'reasons': ['基于基因组信息估算（转录本数据库查询失败时的备选方案）']
+                    }
+                ],
+                'database_coverage': {'FALLBACK': 1},
+                'conflicts': [],
+                'note': 'NCBI/Ensembl/APPRIS数据库均未返回有效转录本，使用基于基因信息的估算值。建议：1)检查NCBI配置 2)手动查询NCBI Gene数据库'
+            }
+            
+            return fallback_result
+            
+        except Exception as e:
+            logger.error(f"创建备选转录本失败: {e}")
+            return None
 
     def _calculate_transcript_score(self, tx_info: Dict, cell_line: Optional[str]) -> Tuple[float, List[str]]:
         score = 0.0
@@ -3332,9 +3452,9 @@ class GeneInputComponent:
                 st.markdown("#### 🧪 抗体推荐")
                 antibody = gene_info.get('antibody', {})
                 if antibody.get('name'):
-                    # 优先使用基因页面链接，更稳定
                     antibody_name = antibody['name']
-                    hpa_url = antibody.get('hpa_gene_url') or antibody.get('hpa_search_url', '')
+                    # 优先使用搜索该抗体的链接
+                    hpa_url = antibody.get('hpa_search_url') or antibody.get('hpa_gene_url', '')
                     st.markdown(f"**产品名称:** [{antibody_name}]({hpa_url})")
                     st.caption(f"[在HPA数据库中查看抗体详情]({hpa_url})")
                 else:
@@ -3631,31 +3751,37 @@ class HybridAssessmentEngine:
                 'status': 'no_api'
             }
 
-        # HPA数据查询 + 高级分析
-        if organism == 'Homo sapiens' and effective_cell_line:
+        # HPA基因详细信息查询（仅用于提取基因基本信息，不再查询细胞系特异性表达）
+        if organism == 'Homo sapiens':
             try:
                 # 确保HPA数据已下载
                 self.hpa.check_and_download()
-
-                with st.spinner("查询HPA表达数据并进行高级分析..."):
-                    hpa_data = self.hpa.get_expression_data(gene_name, effective_cell_line)
-                    if hpa_data:
-                        result['hpa_data'] = hpa_data
-                    else:
-                        result['hpa_data'] = {
-                            'message': f'在HPA数据库中未找到{gene_name}在{effective_cell_line}中的表达数据',
-                            'searched_cell_line': effective_cell_line
-                        }
-
+                
+                # 使用hpa_detail_service获取基因详细信息（用于展示面板）
+                if self.hpa_detail_service:
+                    with st.spinner("查询HPA基因详细信息..."):
+                        hpa_gene_details = self.hpa_detail_service.get_gene_details(gene_name)
+                        if hpa_gene_details:
+                            result['hpa_gene_details'] = hpa_gene_details
+                        else:
+                            result['hpa_gene_details'] = {
+                                'message': f'在HPA数据库中未找到{gene_name}的详细信息',
+                                'gene_symbol': gene_name
+                            }
+                else:
+                    result['hpa_gene_details'] = {
+                        'message': 'HPA详细信息服务未初始化',
+                        'note': '请检查HPA数据文件是否可用'
+                    }
 
             except Exception as e:
-                logger.error(f"HPA分析失败: {e}")
-                result['warnings'].append(f"HPA分析失败: {str(e)}")
+                logger.error(f"HPA基因信息查询失败: {e}")
+                result['warnings'].append(f"HPA基因信息查询失败: {str(e)}")
                 result['hpa_analysis_error'] = str(e)
         else:
-            result['hpa_data'] = {
-                'message': f'HPA仅支持人类细胞系。当前: {organism}, {effective_cell_line}',
-                'note': 'HPA仅包含人类细胞系数据'
+            result['hpa_gene_details'] = {
+                'message': f'HPA仅支持人类基因。当前物种: {organism}',
+                'note': 'HPA仅包含人类基因数据'
             }
 
         # 细胞系评估
