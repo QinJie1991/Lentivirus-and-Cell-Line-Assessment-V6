@@ -1528,15 +1528,33 @@ class HPADataManager:
         if not os.path.exists(self.local_dir):
             os.makedirs(self.local_dir)
 
-    def check_and_download(self):
-        """检查并下载HPA数据"""
-        if not os.path.exists(self.data_file):
-            self._download_hpa_data()
+    def check_and_download(self) -> Dict:
+        """检查并下载HPA数据，返回状态信息"""
+        status = {
+            'exists': False,
+            'downloaded': False,
+            'error': None,
+            'file_path': self.data_file
+        }
+        
+        if os.path.exists(self.data_file):
+            status['exists'] = True
+            return status
+        
+        # 尝试下载
+        download_result = self._download_hpa_data()
+        status['downloaded'] = download_result.get('success', False)
+        status['error'] = download_result.get('error')
+        status['file_path'] = self.data_file  # 可能在下载过程中更新了路径
+        status['exists'] = os.path.exists(self.data_file)
+        
+        return status
 
-    def _download_hpa_data(self):
-        """下载proteinatlas.tsv"""
+    def _download_hpa_data(self) -> Dict:
+        """下载proteinatlas.tsv，返回下载结果状态"""
+        result = {'success': False, 'error': None}
         try:
-            logger.info("正在下载HPA数据库（proteinatlas.tsv，约200MB），请稍候...")
+            logger.info("【HPA下载】开始下载HPA数据库（proteinatlas.tsv，约200MB）...")
             zip_path = os.path.join(self.local_dir, "proteinatlas.tsv.zip")
 
             response = requests.get(self.HPA_URL, stream=True, timeout=300)
@@ -1552,9 +1570,9 @@ class HPADataManager:
                         downloaded += len(chunk)
                         if total_size > 0 and downloaded % (1024*1024) == 0:
                             progress = (downloaded / total_size) * 100
-                            logger.info(f"HPA下载进度: {progress:.1f}%")
+                            logger.info(f"【HPA下载】进度: {progress:.1f}%")
 
-            logger.info("正在解压HPA数据...")
+            logger.info("【HPA下载】正在解压HPA数据...")
             with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                 zip_ref.extractall(self.local_dir)
 
@@ -1564,15 +1582,31 @@ class HPADataManager:
                 for f in extracted_files:
                     if f.endswith('.tsv') and 'proteinatlas' in f.lower():
                         self.data_file = os.path.join(self.local_dir, f)
-                        logger.info(f"使用实际文件名: {f}")
+                        logger.info(f"【HPA下载】使用实际文件名: {f}")
                         break
 
             os.remove(zip_path)
-            st.success("HPA数据下载完成")
+            
+            # 验证最终文件
+            if os.path.exists(self.data_file):
+                file_size = os.path.getsize(self.data_file)
+                logger.info(f"【HPA下载】✓ 下载完成，文件大小: {file_size / (1024*1024):.1f} MB")
+                result['success'] = True
+            else:
+                result['error'] = '解压后未找到proteinatlas.tsv文件'
+                logger.error(f"【HPA下载】✗ {result['error']}")
 
+        except requests.exceptions.Timeout:
+            result['error'] = '下载超时（超过5分钟），请检查网络连接后刷新页面重试'
+            logger.error(f"【HPA下载】✗ 下载超时")
+        except requests.exceptions.ConnectionError:
+            result['error'] = '网络连接错误，请检查网络后刷新页面重试'
+            logger.error(f"【HPA下载】✗ 网络连接错误")
         except Exception as e:
-            logger.error(f"HPA download error: {e}", exc_info=True)
-            st.error(f"HPA数据下载失败: {str(e)}")
+            result['error'] = f'下载失败: {str(e)}'
+            logger.error(f"【HPA下载】✗ {result['error']}", exc_info=True)
+        
+        return result
 
 # ==================== HPA基因自动补全服务（基于Gene synonym）====================
 class HPAGeneAutocompleteService:
@@ -1784,21 +1818,34 @@ class HPAGeneDetailService:
     
     def get_gene_details(self, gene_symbol: str) -> Optional[Dict]:
         """获取基因详细信息"""
-        if not self.data_file or not os.path.exists(self.data_file):
-            return None
+        if not self.data_file:
+            logger.error("HPA数据文件路径未设置")
+            return {'error': '数据文件路径未设置', 'data_file': None}
+        
+        if not os.path.exists(self.data_file):
+            logger.error(f"HPA数据文件不存在: {self.data_file}")
+            return {'error': f'数据文件不存在: {self.data_file}', 'data_file': self.data_file}
         
         gene_symbol_upper = gene_symbol.upper().strip()
+        logger.info(f"查询HPA基因: {gene_symbol_upper}, 数据文件: {self.data_file}")
         
         try:
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter='\t')
+                row_count = 0
                 for row in reader:
+                    row_count += 1
                     if row.get('Gene name', '').upper().strip() == gene_symbol_upper:
+                        logger.info(f"找到基因 {gene_symbol_upper} 在第 {row_count} 行")
                         return self._extract_gene_data(row)
+                logger.warning(f"扫描了 {row_count} 行，未找到基因: {gene_symbol_upper}")
         except Exception as e:
             logger.error(f"获取基因详情失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {'error': f'读取数据文件失败: {str(e)}', 'data_file': self.data_file}
         
-        return None
+        return {'error': f'未找到基因: {gene_symbol}', 'data_file': self.data_file, 'rows_scanned': row_count}
     
     def _extract_gene_data(self, row: Dict) -> Dict:
         """从行数据中提取基因信息"""
@@ -1987,8 +2034,16 @@ class NCBIClient:
             elif response.status_code == 429:
                 logger.error("NCBI API 请求过于频繁，请添加 API key 以提高限额")
             return None
+        except requests.exceptions.Timeout as e:
+            logger.error(f"NCBI request timeout: {e}")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"NCBI connection error: {e}")
+            return None
         except Exception as e:
-            logger.error(f"NCBI request failed: {e}")
+            logger.error(f"NCBI request failed: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
     @safe_cache_data
@@ -2060,16 +2115,41 @@ class NCBIClient:
                         ids.extend(term_ids)
                         logger.info(f"找到 {len(term_ids)} 个转录本 (查询: {term[:50]}...)")
                 else:
-                    debug_info.append(f"策略 '{term[:40]}...': 请求失败")
+                    debug_info.append(f"策略 '{term[:40]}...': 请求失败 (None)")
             
             # 去重
             ids = list(dict.fromkeys(ids))  # 保持顺序去重
             
             if not ids:
-                logger.warning(f"基因ID {gene_id} 未找到任何转录本")
-                # 存储调试信息供上层使用
-                self._last_transcript_debug = debug_info
-                return []
+                logger.warning(f"基因ID {gene_id} 未找到任何转录本，尝试elink备选方案...")
+                # 备选方案：使用elink从gene链接到nuccore
+                try:
+                    elink_params = {
+                        'dbfrom': 'gene',
+                        'db': 'nuccore',
+                        'id': gene_id,
+                        'retmode': 'json',
+                        'linkname': 'gene_nuccore_refseqrna'
+                    }
+                    elink_result = self._make_request('elink.fcgi', elink_params)
+                    if elink_result:
+                        linksets = elink_result.get('linksets', [])
+                        for linkset in linksets:
+                            linksetdbs = linkset.get('linksetdbs', [])
+                            for linksetdb in linksetdbs:
+                                if linksetdb.get('dbto') == 'nuccore':
+                                    new_ids = linksetdb.get('links', [])
+                                    if new_ids:
+                                        ids.extend(new_ids)
+                                        debug_info.append(f"elink备选方案: 找到 {len(new_ids)} 个ID")
+                    if not ids:
+                        debug_info.append("elink备选方案: 未找到任何转录本")
+                except Exception as e:
+                    debug_info.append(f"elink备选方案失败: {e}")
+                
+                if not ids:
+                    self._last_transcript_debug = debug_info
+                    return []
 
             # 步骤2：获取详细信息
             summary_params = {
@@ -2936,7 +3016,6 @@ class TranscriptSelector:
             import traceback
             logger.error(traceback.format_exc())
         return transcripts
-        return transcripts
 
     def _fetch_ensembl(self, gene_name: str) -> Dict:
         transcripts = {}
@@ -3580,6 +3659,7 @@ class HybridAssessmentEngine:
         self.ai = AIAnalysisClient(ai_api_key) if ai_api_key else None
         self.hard_rules = HybridHardRulesEngine(self.ncbi, self.ai)
         self.hpa = HPADataManager()
+        self.hpa_detail_service = HPAGeneDetailService(self.hpa)
         self.email = email
 
     def assess(self, gene_name: str, organism: str, cell_line: Optional[str],
@@ -3754,28 +3834,53 @@ class HybridAssessmentEngine:
         # HPA基因详细信息查询（仅用于提取基因基本信息，不再查询细胞系特异性表达）
         if organism == 'Homo sapiens':
             try:
-                # 确保HPA数据已下载
-                self.hpa.check_and_download()
+                # 检查HPA数据下载状态
+                hpa_status = self.hpa.check_and_download()
                 
-                # 使用hpa_detail_service获取基因详细信息（用于展示面板）
-                if self.hpa_detail_service:
+                if hpa_status.get('error'):
+                    logger.error(f"【HPA】数据不可用: {hpa_status['error']}")
+                    result['hpa_gene_details'] = {
+                        'message': f'HPA数据不可用: {hpa_status["error"]}',
+                        'note': '请刷新页面重新下载HPA数据',
+                        'status': 'download_failed'
+                    }
+                elif not hpa_status.get('exists'):
+                    logger.error("【HPA】数据文件不存在")
+                    result['hpa_gene_details'] = {
+                        'message': 'HPA数据文件不存在',
+                        'note': '请刷新页面下载HPA数据',
+                        'status': 'not_found'
+                    }
+                elif self.hpa_detail_service:
                     with st.spinner("查询HPA基因详细信息..."):
                         hpa_gene_details = self.hpa_detail_service.get_gene_details(gene_name)
-                        if hpa_gene_details:
+                        if hpa_gene_details and not hpa_gene_details.get('error'):
                             result['hpa_gene_details'] = hpa_gene_details
+                        elif hpa_gene_details and hpa_gene_details.get('error'):
+                            # 返回了错误信息
+                            result['hpa_gene_details'] = {
+                                'message': f'HPA查询失败: {hpa_gene_details.get("error")}',
+                                'gene_symbol': gene_name,
+                                'debug_info': hpa_gene_details,
+                                'status': 'query_error'
+                            }
                         else:
                             result['hpa_gene_details'] = {
                                 'message': f'在HPA数据库中未找到{gene_name}的详细信息',
-                                'gene_symbol': gene_name
+                                'gene_symbol': gene_name,
+                                'status': 'not_found'
                             }
                 else:
                     result['hpa_gene_details'] = {
                         'message': 'HPA详细信息服务未初始化',
-                        'note': '请检查HPA数据文件是否可用'
+                        'note': '请检查HPA数据文件是否可用',
+                        'status': 'service_not_initialized'
                     }
 
             except Exception as e:
-                logger.error(f"HPA基因信息查询失败: {e}")
+                logger.error(f"【HPA】基因信息查询失败: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 result['warnings'].append(f"HPA基因信息查询失败: {str(e)}")
                 result['hpa_analysis_error'] = str(e)
         else:
@@ -3982,6 +4087,16 @@ def render_main_panel():
         if 'hpa_gene_service' not in st.session_state:
             # 尝试从现有的HPA管理器获取数据文件路径
             hpa_manager = st.session_state.get('hpa_manager')
+            if hpa_manager:
+                # 检查HPA数据是否可用
+                hpa_status = hpa_manager.check_and_download()
+                if hpa_status.get('error'):
+                    st.warning(f"⚠️ HPA数据下载失败: {hpa_status['error']}")
+                    st.info("📌 请刷新页面重新尝试下载")
+                elif not hpa_status.get('exists') and not hpa_status.get('downloaded'):
+                    st.warning("⚠️ HPA数据尚未下载")
+                    st.info("📌 首次使用需要下载约200MB数据，请刷新页面")
+            
             st.session_state['hpa_gene_service'] = HPAGeneAutocompleteService(hpa_manager)
             st.session_state['hpa_gene_detail_service'] = HPAGeneDetailService(hpa_manager)
         
@@ -4775,6 +4890,32 @@ def render_results(result: Dict):
             st.info("未获取到转录本选择数据")
 
 def main():
+    # ===== 日志收集器（用于主界面显示） =====
+    if 'app_logs' not in st.session_state:
+        st.session_state['app_logs'] = []
+    
+    # 自定义日志处理器，将日志显示在主界面
+    class StreamlitLogHandler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                if len(st.session_state['app_logs']) > 100:
+                    st.session_state['app_logs'].pop(0)
+                st.session_state['app_logs'].append({
+                    'time': datetime.now().strftime('%H:%M:%S'),
+                    'level': record.levelname,
+                    'message': msg
+                })
+            except:
+                pass
+    
+    # 添加 Streamlit 日志处理器
+    if not any(isinstance(h, StreamlitLogHandler) for h in logger.handlers):
+        st_handler = StreamlitLogHandler()
+        st_handler.setLevel(logging.INFO)
+        st_handler.setFormatter(logging.Formatter('%(message)s'))
+        logger.addHandler(st_handler)
+    
     try:
         if not AuthManager.check_password():
             st.stop()
@@ -4782,12 +4923,25 @@ def main():
         st.error(f"密码验证模块错误: {e}")
         st.stop()
 
+    # ===== HPA 数据下载（带状态检测） =====
+    hpa_status = {'exists': False, 'downloaded': False, 'error': None}
     try:
         hpa_manager = HPADataManager()
-        hpa_manager.check_and_download()
-        st.session_state['hpa_manager'] = hpa_manager  # 存入session_state供基因自动补全服务使用
+        hpa_status = hpa_manager.check_and_download()
+        st.session_state['hpa_manager'] = hpa_manager
+        
+        # 显示下载状态
+        if hpa_status.get('error'):
+            st.error(f"⚠️ HPA数据下载失败: {hpa_status['error']}")
+            st.warning("📌 请刷新页面重新尝试下载")
+        elif hpa_status.get('downloaded'):
+            st.success("✓ HPA数据下载完成")
+        elif hpa_status.get('exists'):
+            logger.info("【HPA】数据文件已存在，跳过下载")
+            
     except Exception as e:
         st.warning(f"HPA数据管理器初始化警告: {e}")
+        hpa_status['error'] = str(e)
 
     try:
         render_sidebar()
@@ -4860,6 +5014,22 @@ def main():
             logger.exception(f"Unhandled error: {e}")
             st.error(f"系统错误: {str(e)}")
             st.exception(e)
+    
+    # ===== 底部：日志显示区域 =====
+    with st.expander("📋 应用日志（点击展开）", expanded=False):
+        if st.session_state['app_logs']:
+            # 复制按钮
+            log_text = "\n".join([f"[{log['time']}] {log['level']}: {log['message']}" 
+                                  for log in st.session_state['app_logs']])
+            st.text_area("日志内容（可复制）", log_text, height=200, key="log_display")
+            
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                if st.button("🗑️ 清空日志"):
+                    st.session_state['app_logs'] = []
+                    st.rerun()
+        else:
+            st.caption("暂无日志")
 
 if __name__ == "__main__":
     main()
