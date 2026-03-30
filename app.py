@@ -16,6 +16,7 @@ import os
 import difflib
 import csv
 import xml.etree.ElementTree as ET
+import base64
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
@@ -1832,9 +1833,15 @@ class HPAGeneDetailService:
         try:
             with open(self.data_file, 'r', encoding='utf-8') as f:
                 reader = csv.DictReader(f, delimiter='\t')
+                # 调试：显示列名
+                if reader.fieldnames:
+                    logger.info(f"【HPA调试】文件列名: {list(reader.fieldnames)[:10]}...")  # 只显示前10个
                 row_count = 0
                 for row in reader:
                     row_count += 1
+                    if row_count == 1:
+                        # 调试：显示第一行的Gene name
+                        logger.info(f"【HPA调试】第一行Gene name: '{row.get('Gene name', 'N/A')}'")
                     if row.get('Gene name', '').upper().strip() == gene_symbol_upper:
                         logger.info(f"找到基因 {gene_symbol_upper} 在第 {row_count} 行")
                         return self._extract_gene_data(row)
@@ -3286,7 +3293,7 @@ class GeneInputComponent:
         self.hpa_gene_service = hpa_gene_service
         self.hpa_detail_service = hpa_detail_service
 
-    def render(self, organism: str = "human", key_prefix: str = "gene") -> Optional[str]:
+    def render(self, organism: str = "human", key_prefix: str = "gene", disabled: bool = False) -> Optional[str]:
         input_key = f"{key_prefix}_input"
         selected_key = f"{key_prefix}_selected"
         suggestions_key = f"{key_prefix}_suggestions"
@@ -3342,7 +3349,8 @@ class GeneInputComponent:
             input_label,
             value=st.session_state[input_key],
             placeholder="例如：TP53, EGFR, GAPDH...",
-            key=f"{key_prefix}_text_widget"
+            key=f"{key_prefix}_text_widget",
+            disabled=disabled
         )
 
         if user_input != st.session_state[input_key]:
@@ -4066,8 +4074,16 @@ def render_main_panel():
         st.session_state.cell_line_validation = None
     if 'final_cell_line' not in st.session_state:
         st.session_state.final_cell_line = None
+    if 'assessment_locked' not in st.session_state:
+        st.session_state.assessment_locked = False
 
     col1, col2 = st.columns(2)
+
+    # 检查是否处于锁定状态
+    is_locked = st.session_state.get('assessment_locked', False)
+    
+    if is_locked:
+        st.warning("🔒 当前评估已锁定。如需进行新评估，请点击下方的「开始新评估」按钮。")
 
     with col1:
         organism = st.selectbox(
@@ -4080,7 +4096,8 @@ def render_main_panel():
                 "cho": "CHO (Cricetulus griseus)",
                 "pig": "家猪 (Sus scrofa)",
                 "monkey": "猴子 (Macaca mulatta)"
-            }.get(x, x)
+            }.get(x, x),
+            disabled=is_locked
         )
 
         # ===== HPA基因自动补全服务初始化 =====
@@ -4106,7 +4123,7 @@ def render_main_panel():
         gene_service = GeneAutocompleteService()  # 保留用于其他可能的用途
         # 基因输入完全基于HPA数据包（抛弃NCBI自动补全）
         gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
-        gene = gene_component.render(organism, key_prefix="main_gene")
+        gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
 
     with col2:
         # ===== HPA细胞系自动补全输入（新增功能）=====
@@ -4115,13 +4132,14 @@ def render_main_panel():
 
         cell_service = st.session_state.cell_line_component
 
-        # 输入框
+        # 输入框 - 根据锁定状态禁用
         cell_input = st.text_input(
             "细胞系（HPA数据库自动补全，输入1字符即显示建议）",
             value=st.session_state.get('cell_line_input', ''),
             placeholder="例如：A549, HeLa, MCF7, NCI-H226, HEK293, SH-SY5Y...",
             help="输入细胞系名称，系统从HPA数据库1206个细胞系中匹配。支持模糊匹配、大小写不敏感、分隔符容错。",
-            key="cell_line_widget"
+            key="cell_line_widget",
+            disabled=is_locked
         )
 
         # 保存输入并触发建议更新
@@ -4232,10 +4250,35 @@ def render_main_panel():
             "overexpression": "过表达 (OE)",
             "knockdown": "敲低 (RNAi)",
             "knockout": "敲除 (CRISPR)"
-        }.get(x, x)
+        }.get(x, x),
+        disabled=is_locked
     )
 
-    analyze = st.button("开始AI智能评估", type="primary", use_container_width=True)
+    # 按钮区域
+    col_btn1, col_btn2 = st.columns([3, 1])
+    
+    with col_btn1:
+        if is_locked:
+            analyze = st.button("🔒 评估已锁定", type="primary", use_container_width=True, disabled=True)
+        else:
+            analyze = st.button("开始AI智能评估", type="primary", use_container_width=True)
+    
+    with col_btn2:
+        if is_locked:
+            if st.button("🔄 开始新评估", type="secondary", use_container_width=True):
+                # 重置锁定状态和所有相关session state
+                st.session_state.assessment_locked = False
+                st.session_state.cell_line_input = ''
+                st.session_state.cell_line_selected = None
+                st.session_state.cell_line_validation = None
+                st.session_state.final_cell_line = None
+                # 清除之前的评估结果
+                for key in list(st.session_state.keys()):
+                    if key.startswith('gene_input_') or key.startswith('hpa_info_'):
+                        del st.session_state[key]
+                safe_rerun()
+        else:
+            st.button("🔄 开始新评估", type="secondary", use_container_width=True, disabled=True, help="请先完成当前评估")
 
     final_cell_line = st.session_state.get('final_cell_line')
     return organism, gene, final_cell_line, exp_type, analyze
@@ -4282,7 +4325,7 @@ def render_results(result: Dict):
                 if cell_meta.get('cell_type'):
                     st.write(f"**细胞类型**: {cell_meta['cell_type']}")
 
-    col_exp1, col_exp2 = st.columns(2)
+    col_exp1, col_exp2, col_exp3 = st.columns(3)
     with col_exp1:
         exporter = ReportExporter()
         html_report = exporter.generate_html_report(result)
@@ -4300,6 +4343,13 @@ def render_results(result: Dict):
             file_name=f"assessment_{result['gene']}_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
+    with col_exp3:
+        # PDF导出 - 在新标签页打开
+        pdf_html = exporter.generate_html_report(result)  # 先用HTML作为基础
+        # 使用JavaScript在新标签页打开
+        b64_pdf = base64.b64encode(pdf_html.encode()).decode()
+        pdf_link = f'<a href="data:text/html;base64,{b64_pdf}" target="_blank" style="text-decoration:none;"><button style="width:100%;padding:8px 16px;background-color:#f0f2f6;border:1px solid #ddd;border-radius:4px;cursor:pointer;">在新标签页查看报告</button></a>'
+        st.markdown(pdf_link, unsafe_allow_html=True)
 
     rec = result['final_recommendation']
     rec_color = {"BLOCKED": "#ffebee", "警告": "#fff3e0", "未检测": "#fff8e1", "未": "#e8f5e9"}.get(rec[:2], "#f5f5f5")
@@ -4326,6 +4376,25 @@ def render_results(result: Dict):
 
     with tabs[0]:
         st.markdown("### 混合硬性规则检查")
+        
+        # ===== CDS长度信息 =====
+        tx_data = result.get('transcript_selection', {})
+        if tx_data and isinstance(tx_data, dict):
+            selected = tx_data.get('selected_transcript', {})
+            if selected:
+                tx_id = selected.get('id', '')
+                tx_info = selected.get('info', {})
+                tx_length = tx_info.get('length', 0)
+                
+                if tx_id and tx_length:
+                    with st.container():
+                        st.subheader("📏 转录本/CDS信息")
+                        ncbi_url = f"https://www.ncbi.nlm.nih.gov/nuccore/{tx_id}"
+                        st.markdown(f"**转录本ID**: [{tx_id}]({ncbi_url})")
+                        st.markdown(f"**序列长度**: {tx_length} bp")
+                        st.caption(f"[→ NCBI查看详情]({ncbi_url})")
+                    st.divider()
+        
         hierarchy = result.get('decision_hierarchy', {})
         hard_rules = hierarchy.get('hard_rules', {})
         evidence_summary = hard_rules.get('evidence_summary', {})
@@ -4468,20 +4537,29 @@ def render_results(result: Dict):
         # 获取基因详情 - 使用 hpa_detail_service
         gene_details = None
         gene_name = result.get('gene') or result.get('gene_name')
+        st.caption(f"调试: 查询基因名 = '{gene_name}'")
+        
         if gene_name:
             try:
                 # 优先使用 hpa_detail_service
                 hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
+                st.caption(f"调试: hpa_detail_service = {hpa_detail_service is not None}")
                 if hpa_detail_service:
                     gene_details = hpa_detail_service.get_gene_details(gene_name)
+                    st.caption(f"调试: gene_details type = {type(gene_details)}")
+                    if gene_details:
+                        st.caption(f"调试: gene_details keys = {list(gene_details.keys()) if isinstance(gene_details, dict) else 'N/A'}")
+                        if isinstance(gene_details, dict) and gene_details.get('error'):
+                            st.error(f"HPA查询错误: {gene_details.get('error')}")
+                    else:
+                        st.warning("调试: gene_details 为 None")
                 else:
-                    # 备选：尝试从 hpa_gene_service 获取
-                    hpa_service = st.session_state.get('hpa_gene_service')
-                    if hpa_service and hasattr(hpa_service, 'get_gene_details'):
-                        gene_details = hpa_service.get_gene_details(gene_name)
+                    st.warning("调试: hpa_detail_service 不存在于 session_state")
             except Exception as e:
                 logger.warning(f"获取HPA基因详情失败: {e}")
                 st.warning(f"获取HPA基因详情失败: {e}")
+        else:
+            st.warning("调试: gene_name 为空")
         
         if gene_details:
             data = gene_details
@@ -5062,6 +5140,11 @@ def main():
                     cell_validation=cell_validation
                 )
                 render_results(result)
+                
+                # 评估完成后锁定页面
+                st.session_state.assessment_locked = True
+                st.success("✓ 评估完成！页面已锁定。如需进行新评估，请点击「开始新评估」按钮。")
+                safe_rerun()
 
         except Exception as e:
             logger.exception(f"Unhandled error: {e}")
