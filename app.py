@@ -3873,23 +3873,33 @@ class HybridAssessmentEngine:
                     }
                 elif self.hpa_detail_service:
                     with st.spinner("查询HPA基因详细信息..."):
-                        # 使用NCBI返回的官方基因名进行HPA查询
-                        official_gene_name = gene_info_basic.get('name', gene_name)
-                        hpa_gene_details = self.hpa_detail_service.get_gene_details(official_gene_name)
+                        # 优先使用用户输入的基因名进行HPA查询（用户输入的通常是基因符号）
+                        # 如果失败，再尝试NCBI返回的名称
+                        hpa_gene_details = None
+                        
+                        # 首先尝试用户输入的原始基因名
+                        hpa_gene_details = self.hpa_detail_service.get_gene_details(gene_name)
+                        
+                        # 如果失败且NCBI返回的名称不同，再尝试NCBI名称
+                        if (hpa_gene_details and hpa_gene_details.get('error')) or not hpa_gene_details:
+                            ncbi_name = gene_info_basic.get('name', '')
+                            if ncbi_name and ncbi_name.upper() != gene_name.upper():
+                                hpa_gene_details = self.hpa_detail_service.get_gene_details(ncbi_name)
+                        
                         if hpa_gene_details and not hpa_gene_details.get('error'):
                             result['hpa_gene_details'] = hpa_gene_details
                         elif hpa_gene_details and hpa_gene_details.get('error'):
                             # 返回了错误信息
                             result['hpa_gene_details'] = {
                                 'message': f'HPA查询失败: {hpa_gene_details.get("error")}',
-                                'gene_symbol': official_gene_name,
+                                'gene_symbol': gene_name,
                                 'debug_info': hpa_gene_details,
                                 'status': 'query_error'
                             }
                         else:
                             result['hpa_gene_details'] = {
-                                'message': f'在HPA数据库中未找到{official_gene_name}的详细信息',
-                                'gene_symbol': official_gene_name,
+                                'message': f'在HPA数据库中未找到{gene_name}的详细信息',
+                                'gene_symbol': gene_name,
                                 'status': 'not_found'
                             }
                 else:
