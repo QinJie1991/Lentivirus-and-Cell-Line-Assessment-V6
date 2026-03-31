@@ -4272,6 +4272,7 @@ def render_main_panel():
                 st.session_state.cell_line_selected = None
                 st.session_state.cell_line_validation = None
                 st.session_state.final_cell_line = None
+                st.session_state.last_assessment_result = None  # 清除保存的评估结果
                 # 清除之前的评估结果
                 for key in list(st.session_state.keys()):
                     if key.startswith('gene_input_') or key.startswith('hpa_info_'):
@@ -5085,6 +5086,11 @@ def main():
         st.error(f"主面板渲染错误: {e}")
         return
 
+    # 检查是否有已保存的评估结果（锁定状态下恢复显示）
+    if st.session_state.get('assessment_locked') and st.session_state.get('last_assessment_result'):
+        st.success("✓ 显示上次评估结果（页面已锁定）")
+        render_results(st.session_state['last_assessment_result'])
+
     if analyze:
         if not gene:
             st.error("请输入或选择一个基因")
@@ -5139,6 +5145,8 @@ def main():
                     exp_type,
                     cell_validation=cell_validation
                 )
+                # 保存评估结果到 session_state
+                st.session_state['last_assessment_result'] = result
                 render_results(result)
                 
                 # 评估完成后锁定页面
