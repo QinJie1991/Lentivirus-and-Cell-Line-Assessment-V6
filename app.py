@@ -2098,8 +2098,9 @@ class NCBIClient:
             return {}, {}
 
         summary = result.get('result', {}).get(gene_id, {})
-        # 使用NCBI返回的官方基因名（优先使用NomenclatureName，其次是name）
-        official_name = summary.get('nomenclaturename', '') or summary.get('name', '') or gene_name
+        # 使用NCBI返回的基因符号（优先Symbol，其次是NomenclatureName，最后是name）
+        # symbol 是基因符号如 "WDR83"，name 是描述性名称如 "WD repeat domain 83"
+        official_name = summary.get('symbol', '') or summary.get('genesymbol', '') or summary.get('nomenclaturename', '') or summary.get('name', '') or gene_name
         gene_info = {
             'id': gene_id,
             'name': official_name,
@@ -3023,12 +3024,17 @@ class TranscriptSelector:
                 logger.info(f"NCBI返回 {len(tx_list)} 个转录本")
             
             for tx in tx_list:
-                tx_id = tx['id']
+                # 防御性检查：跳过 None 值
+                if not tx:
+                    continue
+                tx_id = tx.get('id')
+                if not tx_id:
+                    continue
                 transcripts[tx_id] = {
                     'source': 'NCBI',
-                    'status': tx['status'],
-                    'length': tx['length'],
-                    'type': tx['type'],
+                    'status': tx.get('status', ''),
+                    'length': tx.get('length', 0),
+                    'type': tx.get('type', ''),
                     'title': tx.get('title', '')
                 }
             
@@ -3060,6 +3066,9 @@ class TranscriptSelector:
                 data = response.json()
                 for transcript in data.get('Transcript', []):
                     tx_id = transcript.get('id')
+                    # 防御性检查：跳过无效ID
+                    if not tx_id:
+                        continue
                     appris = transcript.get('appris', '')
                     tsl = transcript.get('tsl', '')
                     biotype = transcript.get('biotype', '')
@@ -3088,6 +3097,9 @@ class TranscriptSelector:
                 data = response.json()
                 for tx in data.get('transcripts', []):
                     tx_id = tx.get('id')
+                    # 防御性检查：跳过无效ID
+                    if not tx_id:
+                        continue
                     label = tx.get('principal_isoform', '')
                     firestar = tx.get('firestar_score', 0)
 
@@ -3115,6 +3127,10 @@ class TranscriptSelector:
         merged = {}
 
         for refseq_id, ncbi_info in ncbi.items():
+            # 防御性检查：跳过 None 值
+            if not ncbi_info:
+                continue
+                
             ensembl_id = None
 
             merged[refseq_id] = {
@@ -3152,6 +3168,10 @@ class TranscriptSelector:
         }
 
     def _calculate_transcript_score(self, tx_info: Dict, cell_line: Optional[str]) -> Tuple[float, List[str]]:
+        # 防御性检查：如果 tx_info 为 None，返回默认分数
+        if not tx_info:
+            return 0.0, ["转录本信息不可用"]
+        
         score = 0.0
         reasons = []
 
@@ -3691,6 +3711,16 @@ class HybridAssessmentEngine:
                     cell_line=effective_cell_line
                 )
 
+                # 处理转录本选择失败的情况
+                if not tx_selection:
+                    logger.warning("转录本选择返回None，使用空转录本列表继续评估")
+                    result['warnings'].append("转录本选择失败，将使用默认设置继续评估")
+                    tx_selection = {
+                        'selected_transcript': None,
+                        'all_transcripts': [],
+                        'error': '转录本选择返回None'
+                    }
+
                 if tx_selection.get('needs_confirmation') and tx_selection.get('conflicts'):
                     st.warning("检测到多个高评分转录本，请选择您需要过表达的特定转录本（已优先选择NM，过滤XM）：")
                     options = []
@@ -3713,24 +3743,36 @@ class HybridAssessmentEngine:
                 if tx_selection.get('filtered_xm'):
                     st.caption(f"ℹ️ 已自动过滤 {len(tx_selection['filtered_xm'])} 个XM预测转录本")
 
-                selected_tx = tx_selection.get('selected_transcript', {})
+                selected_tx = tx_selection.get('selected_transcript', {}) or {}
 
-                transcripts = [{
-                    'id': selected_tx.get('id'),
-                    'length': selected_tx.get('info', {}).get('length', 0),
-                    'selection_reason': selected_tx.get('reasons', []),
-                    'confidence': selected_tx.get('score', 0),
-                    'all_candidates': tx_selection.get('all_transcripts', [])
-                }]
+                # 构建转录本列表，处理无转录本数据的情况
+                if selected_tx and selected_tx.get('id'):
+                    transcripts = [{
+                        'id': selected_tx.get('id'),
+                        'length': selected_tx.get('info', {}).get('length', 0),
+                        'selection_reason': selected_tx.get('reasons', []),
+                        'confidence': selected_tx.get('score', 0),
+                        'all_candidates': tx_selection.get('all_transcripts', [])
+                    }]
+                else:
+                    transcripts = []
+                    logger.warning("无有效转录本数据，使用空列表继续评估")
 
                 gene_info = gene_info_basic
 
                 result['transcript_selection'] = tx_selection
         except Exception as e:
             logger.error(f"转录本选择失败: {e}")
-            result['errors'].append(f"转录本选择失败: {str(e)}")
-            result['status'] = 'error'
-            return result
+            result['warnings'].append(f"转录本选择失败: {str(e)}，将使用默认设置继续评估")
+            # 不返回错误，继续评估
+            tx_selection = {
+                'selected_transcript': None,
+                'all_transcripts': [],
+                'error': str(e)
+            }
+            transcripts = []
+            gene_info = gene_info_basic if 'gene_info_basic' in locals() else {}
+            result['transcript_selection'] = tx_selection
 
         result['gene_info'] = {
             'id': gene_info.get('id', ''),
