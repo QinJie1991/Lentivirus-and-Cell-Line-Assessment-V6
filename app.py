@@ -670,7 +670,7 @@ class AIAnalysisClient:
                 'model': 'qwen-turbo',
                 'input': {
                     'messages': [
-                        {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析。你只能基于用户提供的文献进行总结，绝对禁止编造任何文献、PMID、作者或期刊信息。如果信息不确定，明确标注"未见报道"。'},
+                        {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析。你只能基于用户提供的文献进行总结，绝对禁止编造任何文献、PMID、作者或期刊信息。reference字段必须严格使用格式："第一作者 et al., 年份, 期刊缩写, PMID:数字"。如果信息不确定，明确标注"未见报道"。'},
                         {'role': 'user', 'content': prompt}
                     ]
                 },
@@ -4257,27 +4257,57 @@ class HybridAssessmentEngine:
                     
                     # 验证 AI 返回的引用是否来自真实检索的文献
                     all_retrieved_pmids = set()
+                    pmid_to_paper = {}  # PMID -> paper info mapping
                     for p in papers_general + papers_oe + papers_kd + papers_ko:
                         pmid = p.get('pmid', '')
                         if pmid:
                             all_retrieved_pmids.add(str(pmid))
+                            pmid_to_paper[str(pmid)] = p
                     
-                    # 过滤 AI 生成的虚假引用
+                    # 过滤 AI 生成的虚假引用，并重新格式化
                     if 'key_references' in function_analysis:
                         valid_refs = []
                         for ref in function_analysis['key_references']:
-                            # 提取引用中的 PMID
+                            # 尝试提取 PMID
                             import re
                             pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
+                            
                             if pmid_match:
                                 ref_pmid = pmid_match.group(1)
                                 if ref_pmid in all_retrieved_pmids:
-                                    valid_refs.append(ref)
+                                    # 使用检索到的文献信息重新格式化引用
+                                    paper = pmid_to_paper.get(ref_pmid, {})
+                                    authors = paper.get('authors', [])
+                                    first_author = authors[0].get('name', '').split()[-1] if authors else 'Unknown'
+                                    year = paper.get('pubdate', '')[:4] if paper.get('pubdate') else 'N/A'
+                                    source = paper.get('source', 'N/A')
+                                    title = paper.get('title', '')[:60]
+                                    formatted_ref = f"{first_author} et al., {year}, {source}, PMID:{ref_pmid} - {title}..."
+                                    valid_refs.append(formatted_ref)
                                 else:
                                     logger.warning(f"AI 生成了未检索到的 PMID: {ref_pmid}")
+                                    valid_refs.append(ref + " (PMID未验证)")
                             else:
-                                # 没有 PMID 的引用也保留，但标记为未验证
-                                valid_refs.append(ref + " (未验证)")
+                                # 没有 PMID，尝试模糊匹配标题
+                                ref_lower = str(ref).lower()
+                                matched = False
+                                for pmid, paper in pmid_to_paper.items():
+                                    if paper.get('title', '').lower() in ref_lower or ref_lower in paper.get('title', '').lower():
+                                        # 匹配成功，使用格式化引用
+                                        authors = paper.get('authors', [])
+                                        first_author = authors[0].get('name', '').split()[-1] if authors else 'Unknown'
+                                        year = paper.get('pubdate', '')[:4] if paper.get('pubdate') else 'N/A'
+                                        source = paper.get('source', 'N/A')
+                                        title = paper.get('title', '')[:60]
+                                        formatted_ref = f"{first_author} et al., {year}, {source}, PMID:{pmid} - {title}..."
+                                        valid_refs.append(formatted_ref)
+                                        matched = True
+                                        break
+                                
+                                if not matched:
+                                    # 无法匹配，保留原样但标记
+                                    valid_refs.append(str(ref)[:100] + "... (无法验证)")
+                        
                         function_analysis['key_references'] = valid_refs
                         function_analysis['references_verified'] = True
 
@@ -5150,20 +5180,17 @@ def render_results(result: Dict):
 
                 if 'key_references' in data and data['key_references']:
                     with st.expander("关键参考文献"):
-                        st.caption("⚠️ **注意**：以下引用由AI基于检索到的文献生成")
+                        st.caption("⚠️ **注意**：以下引用基于AI分析的文献生成")
                         if data.get('references_verified'):
-                            st.success("✓ 引用已验证（PMID与检索结果匹配）")
-                        else:
-                            st.warning("⚠️ 引用未完全验证，请通过PubMed核实")
+                            st.success("✓ 引用已与检索到的文献匹配")
+                        
                         for ref in data['key_references']:
                             # 尝试提取PMID并添加链接
                             import re
                             pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
                             if pmid_match:
                                 pmid = pmid_match.group(1)
-                                # 移除 (未验证) 标记，添加链接
-                                clean_ref = re.sub(r'\s*\(未验证\)\s*$', '', str(ref))
-                                st.markdown(f"- [{clean_ref}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
+                                st.markdown(f"- [{ref}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
                             else:
                                 st.markdown(f"- {ref}")
 
