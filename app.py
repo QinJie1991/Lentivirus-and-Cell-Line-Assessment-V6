@@ -2278,9 +2278,13 @@ class NCBIClient:
         queries = query_map.get(query_type, [f"{gene_name}"])
         all_papers = []
         seen_pmids = set()
+        
+        logger.info(f"【文献检索】开始检索 {gene_name} 的 {query_type} 文献，使用 {len(queries)} 个查询词")
 
-        for query in queries:
+        for i, query in enumerate(queries):
             try:
+                logger.info(f"【文献检索】查询 {i+1}/{len(queries)}: {query}")
+                
                 search_params = {
                     'db': 'pubmed',
                     'term': query,
@@ -2289,20 +2293,29 @@ class NCBIClient:
                     'sort': 'relevance'
                 }
                 result = self._make_request('esearch.fcgi', search_params)
+                
                 if not result:
+                    logger.warning(f"【文献检索】查询 '{query}' 返回空结果")
                     continue
 
                 pmids = result.get('esearchresult', {}).get('idlist', [])
+                logger.info(f"【文献检索】查询 '{query}' 找到 {len(pmids)} 个PMID: {pmids[:5]}")
+                
                 new_pmids = [p for p in pmids if p not in seen_pmids]
                 if not new_pmids:
+                    logger.info(f"【文献检索】查询 '{query}' 无新PMID")
                     continue
 
                 fetch_params = {'db': 'pubmed', 'id': ','.join(new_pmids), 'retmode': 'json'}
                 result = self._make_request('esummary.fcgi', fetch_params)
+                
                 if not result:
+                    logger.warning(f"【文献检索】获取详情失败 for PMIDs: {new_pmids}")
                     continue
 
                 docs = result.get('result', {})
+                success_count = 0
+                
                 for pmid in new_pmids:
                     try:
                         doc = docs.get(pmid, {})
@@ -2310,6 +2323,7 @@ class NCBIClient:
                         abstract = doc.get('abstract', '') or doc.get('sorttitle', '')
 
                         if not title:
+                            logger.warning(f"【文献检索】PMID {pmid} 无标题")
                             continue
 
                         all_papers.append({
@@ -2322,13 +2336,18 @@ class NCBIClient:
                             'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                         })
                         seen_pmids.add(pmid)
-                    except Exception:
+                        success_count += 1
+                    except Exception as e:
+                        logger.error(f"【文献检索】处理 PMID {pmid} 失败: {e}")
                         continue
+                
+                logger.info(f"【文献检索】查询 '{query}' 成功获取 {success_count} 篇文献")
 
             except Exception as e:
-                logger.error(f"Literature search error: {e}")
+                logger.error(f"【文献检索】查询 '{query}' 失败: {e}")
                 continue
-
+        
+        logger.info(f"【文献检索】{gene_name} {query_type} 总计获取 {len(all_papers)} 篇文献")
         return all_papers
 
     def search_gene_property_literature(self, gene_name: str, property_type: str) -> List[Dict]:
@@ -4521,6 +4540,50 @@ def render_sidebar():
 
         st.divider()
         st.caption("核心列表+文献补充+AI语义分析混合策略")
+        
+        # 添加系统诊断按钮
+        st.divider()
+        st.subheader("🔧 系统诊断")
+        if st.button("测试API连接", key="test_api_btn"):
+            with st.spinner("正在测试API连接..."):
+                # 测试NCBI连接
+                try:
+                    ncbi_test = NCBIClient(email=email, api_key=key)
+                    # 尝试搜索一个简单的查询
+                    test_result = ncbi_test._make_request('esearch.fcgi', {
+                        'db': 'pubmed',
+                        'term': 'test',
+                        'retmode': 'json',
+                        'retmax': 1
+                    })
+                    if test_result:
+                        st.success("✓ NCBI API 连接正常")
+                    else:
+                        st.error("✗ NCBI API 返回空结果")
+                except Exception as e:
+                    st.error(f"✗ NCBI API 连接失败: {str(e)[:100]}")
+                
+                # 测试AI连接
+                if final_qwen:
+                    try:
+                        ai_test = QwenAnalyzer(api_key=final_qwen)
+                        # 尝试一个简单的API调用
+                        test_response = ai_test._make_request({
+                            'model': 'qwen-turbo',
+                            'input': {
+                                'messages': [
+                                    {'role': 'user', 'content': 'Hello'}
+                                ]
+                            }
+                        })
+                        if test_response and test_response.get('output'):
+                            st.success("✓ AI API 连接正常")
+                        else:
+                            st.error("✗ AI API 返回异常")
+                    except Exception as e:
+                        st.error(f"✗ AI API 连接失败: {str(e)[:100]}")
+                else:
+                    st.warning("⚠️ 未配置AI API，跳过测试")
 
 def render_main_panel():
     st.markdown("""
@@ -4537,6 +4600,10 @@ def render_main_panel():
         st.session_state.final_cell_line = None
     if 'assessment_locked' not in st.session_state:
         st.session_state.assessment_locked = False
+    if 'cell_line_selected' not in st.session_state:
+        st.session_state.cell_line_selected = None
+    if 'cell_line_input' not in st.session_state:
+        st.session_state.cell_line_input = ''
 
     col1, col2 = st.columns(2)
 
@@ -4614,8 +4681,16 @@ def render_main_panel():
         cell_metadata = None
 
         # 显示自动补全建议
+        show_debug = st.checkbox("显示调试信息", value=False, key="debug_cell_line")
+        if show_debug:
+            st.write(f"Debug: cell_input='{cell_input}', selected={st.session_state.get('cell_line_selected')}")
+            st.write(f"Debug: service loaded={cell_service is not None}, index size={len(cell_service.search_index) if cell_service else 0}")
+        
         if cell_input and len(cell_input) >= 1 and not st.session_state.get('cell_line_selected'):
             suggestions = cell_service.get_suggestions(cell_input, limit=8)
+            
+            if show_debug:
+                st.write(f"Debug: suggestions count={len(suggestions)}")
 
             if suggestions:
                 st.caption(f"💡 HPA数据库匹配 ({len(suggestions)}个建议)：")
@@ -4645,6 +4720,10 @@ def render_main_panel():
                                 'warning': None
                             }
                             safe_rerun()
+
+            elif not suggestions and cell_input:
+                st.caption(f"💡 未找到匹配的HPA细胞系 (输入: '{cell_input}')")
+                st.info("提示：可继续输入或点击「开始评估」使用自定义名称")
 
             # 检查是否有精确匹配但名称不同
             exact_match = cell_service.get_exact_match(cell_input)
@@ -4939,6 +5018,14 @@ def render_results(result: Dict):
             elif status == 'success':
                 data = func_analysis.get('data', {})
                 lit_counts = func_analysis.get('literature_counts', {})
+                
+                # 详细调试：显示AI返回的原始数据
+                with st.expander("🔍 基因功能分析原始数据（调试）", expanded=False):
+                    st.write(f"**status**: {status}")
+                    st.write(f"**data类型**: {type(data)}")
+                    st.write(f"**data键**: {list(data.keys()) if isinstance(data, dict) else '不是字典'}")
+                    st.write(f"**完整data**:")
+                    st.json(data)
 
                 st.markdown("#### 文献覆盖统计")
                 cols = st.columns(4)
@@ -4947,8 +5034,32 @@ def render_results(result: Dict):
                 cols[2].metric("敲低研究", lit_counts.get('knockdown', 0))
                 cols[3].metric("敲除研究", lit_counts.get('knockout', 0))
                 st.caption(f"来源: {func_analysis.get('source', 'AI分析')}")
+                
+                # 调试信息：显示原始文献计数
+                debug_mode = st.checkbox("显示文献检索调试信息", value=False, key="debug_literature")
+                if debug_mode:
+                    st.write(f"**文献检索原始计数**:")
+                    st.write(f"- general: {lit_counts.get('general', 0)}")
+                    st.write(f"- overexpression: {lit_counts.get('overexpression', 0)}")
+                    st.write(f"- knockdown: {lit_counts.get('knockdown', 0)}")
+                    st.write(f"- knockout: {lit_counts.get('knockout', 0)}")
+                    st.write(f"**AI分析数据键**: {list(data.keys()) if data else '无数据'}")
+                    st.write(f"**过表达数据**: {data.get('overexpression', {})}")
 
                 st.divider()
+                
+                # 检查是否有任何功能数据
+                has_any_data = any([
+                    'protein_function' in data,
+                    'overexpression' in data,
+                    'knockdown' in data,
+                    'knockout' in data,
+                    'disease_relevance' in data
+                ])
+                
+                if not has_any_data:
+                    st.warning("⚠️ AI分析未返回具体功能数据")
+                    st.info("可能原因：1) 检索到的文献数量不足 2) AI返回格式异常 3) 该基因研究较少")
 
                 if 'protein_function' in data:
                     with st.expander("蛋白基础功能", expanded=True):
