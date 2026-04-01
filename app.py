@@ -2927,35 +2927,80 @@ class TranscriptSelector:
             'selection_reason': [],
             'all_transcripts': [],
             'database_coverage': {},
+            'database_errors': {},  # 新增：记录每个数据库的错误
             'conflicts': [],
             'filtered_xm': []
         }
 
         with st.spinner("多数据库交叉验证转录本（APPRIS/NCBI/Ensembl，优先NM）..."):
-            ncbi_data = self._fetch_ncbi_refseq(gene_id)
+            # 获取转录本数据并记录错误
+            ncbi_data, ncbi_error = self._fetch_ncbi_refseq_with_error(gene_id)
             results['database_coverage']['NCBI_RefSeq'] = len(ncbi_data)
+            if ncbi_error:
+                results['database_errors']['NCBI_RefSeq'] = ncbi_error
 
-            ensembl_data = self._fetch_ensembl(gene_name)
+            ensembl_data, ensembl_error = self._fetch_ensembl_with_error(gene_name)
             results['database_coverage']['Ensembl'] = len(ensembl_data)
+            if ensembl_error:
+                results['database_errors']['Ensembl'] = ensembl_error
 
-            appris_data = self._fetch_appris(gene_name)
+            appris_data, appris_error = self._fetch_appris_with_error(gene_name)
             results['database_coverage']['APPRIS'] = len(appris_data)
+            if appris_error:
+                results['database_errors']['APPRIS'] = appris_error
 
             ccle_data = {}
             if cell_line:
-                ccle_data = self._fetch_ccle_expression(gene_name, cell_line)
+                ccle_data, ccle_error = self._fetch_ccle_with_error(gene_name, cell_line)
                 results['database_coverage']['CCLE'] = len(ccle_data)
+                if ccle_error:
+                    results['database_errors']['CCLE'] = ccle_error
 
-            # 调试信息显示
-            with st.expander("🔍 转录本获取调试信息", expanded=False):
-                st.write(f"**基因名称**: {gene_name}")
-                st.write(f"**NCBI Gene ID**: {gene_id}")
-                st.write(f"**NCBI RefSeq**: 找到 {len(ncbi_data)} 个转录本")
-                if ncbi_data:
-                    st.write("NCBI转录本列表:", list(ncbi_data.keys())[:5])
-                st.write(f"**Ensembl**: 找到 {len(ensembl_data)} 个转录本")
-                st.write(f"**APPRIS**: 找到 {len(appris_data)} 个转录本")
-                st.write(f"**CCLE**: 找到 {len(ccle_data)} 个表达记录")
+            # 详细调试信息显示
+            with st.expander("🔍 转录本获取诊断信息", expanded=True):  # 默认展开
+                st.write(f"**查询参数**:")
+                st.write(f"- 基因名称: `{gene_name}`")
+                st.write(f"- NCBI Gene ID: `{gene_id}`")
+                
+                # 显示各数据库状态
+                st.write("**数据库查询状态**:")
+                
+                # NCBI
+                if 'NCBI_RefSeq' in results['database_errors']:
+                    st.error(f"❌ NCBI RefSeq: {results['database_errors']['NCBI_RefSeq']}")
+                else:
+                    st.success(f"✓ NCBI RefSeq: 找到 {len(ncbi_data)} 个转录本")
+                    if ncbi_data:
+                        st.write(f"  - 转录本列表: {', '.join(list(ncbi_data.keys())[:5])}")
+                
+                # Ensembl
+                if 'Ensembl' in results['database_errors']:
+                    st.error(f"❌ Ensembl: {results['database_errors']['Ensembl']}")
+                else:
+                    st.success(f"✓ Ensembl: 找到 {len(ensembl_data)} 个转录本")
+                
+                # APPRIS
+                if 'APPRIS' in results['database_errors']:
+                    st.error(f"❌ APPRIS: {results['database_errors']['APPRIS']}")
+                else:
+                    st.success(f"✓ APPRIS: 找到 {len(appris_data)} 个转录本")
+                
+                # CCLE
+                if cell_line:
+                    if 'CCLE' in results['database_errors']:
+                        st.error(f"❌ CCLE: {results['database_errors']['CCLE']}")
+                    else:
+                        st.success(f"✓ CCLE: 找到 {len(ccle_data)} 个表达记录")
+                
+                # 显示网络诊断建议
+                if len(results['database_errors']) >= 3:
+                    st.warning("⚠️ **诊断建议**:")
+                    st.markdown("""
+                    1. **检查网络连接**: Streamlit Cloud 可能无法访问 NCBI/Ensembl API
+                    2. **配置 NCBI API Key**: 在侧边栏输入有效的 NCBI API Key 可提高成功率
+                    3. **检查基因ID**: 确认 `{}` 是有效的 NCBI Gene ID
+                    4. **备选方案**: 如果持续失败，建议手动输入转录本信息
+                    """.format(gene_id))
 
             all_transcripts = self._merge_transcript_sources(
                 ncbi_data, ensembl_data, appris_data, ccle_data
@@ -2963,11 +3008,12 @@ class TranscriptSelector:
 
             if not all_transcripts:
                 st.warning("⚠️ 所有数据库均未返回有效转录本")
-                # 返回错误状态，不进行任何推测
-                fallback_tx = self._create_fallback_transcript(gene_name, gene_id)
+                # 尝试备选方案
+                fallback_tx = self._create_fallback_transcript(gene_name, gene_id, diagnosis=results['database_errors'])
                 if fallback_tx:
+                    fallback_tx['diagnosis'] = results['database_errors']
                     return fallback_tx
-                return {'error': '未找到任何转录本信息', 'fallback': True}
+                return {'error': '未找到任何转录本信息', 'fallback': True, 'diagnosis': results['database_errors']}
 
             # 过滤XM转录本，优先NM
             nm_transcripts = {}
@@ -3017,6 +3063,46 @@ class TranscriptSelector:
                     results['needs_confirmation'] = True
 
         return results
+
+    def _fetch_ncbi_refseq_with_error(self, gene_id: str) -> Tuple[Dict, Optional[str]]:
+        """获取NCBI RefSeq转录本，返回数据和错误信息"""
+        try:
+            data = self._fetch_ncbi_refseq(gene_id)
+            return data, None
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"NCBI RefSeq获取失败: {error_msg}")
+            return {}, f"API请求失败: {error_msg[:100]}"
+
+    def _fetch_ensembl_with_error(self, gene_name: str) -> Tuple[Dict, Optional[str]]:
+        """获取Ensembl转录本，返回数据和错误信息"""
+        try:
+            data = self._fetch_ensembl(gene_name)
+            return data, None
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Ensembl获取失败: {error_msg}")
+            return {}, f"API请求失败: {error_msg[:100]}"
+
+    def _fetch_appris_with_error(self, gene_name: str) -> Tuple[Dict, Optional[str]]:
+        """获取APPRIS转录本，返回数据和错误信息"""
+        try:
+            data = self._fetch_appris(gene_name)
+            return data, None
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"APPRIS获取失败: {error_msg}")
+            return {}, f"API请求失败: {error_msg[:100]}"
+
+    def _fetch_ccle_with_error(self, gene_name: str, cell_line: str) -> Tuple[Dict, Optional[str]]:
+        """获取CCLE表达数据，返回数据和错误信息"""
+        try:
+            data = self._fetch_ccle_expression(gene_name, cell_line)
+            return data, None
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"CCLE获取失败: {error_msg}")
+            return {}, f"数据查询失败: {error_msg[:100]}"
 
     def _fetch_ncbi_refseq(self, gene_id: str) -> Dict:
         """使用NCBI E-utilities获取RefSeq转录本（使用改进的NCBI方法）"""
@@ -3165,7 +3251,7 @@ class TranscriptSelector:
 
         return merged
 
-    def _create_fallback_transcript(self, gene_name: str, gene_id: str) -> Optional[Dict]:
+    def _create_fallback_transcript(self, gene_name: str, gene_id: str, **kwargs) -> Optional[Dict]:
         """当所有数据库都失败时，尝试通过NCBI Datasets网页爬取MANE Select转录本"""
         
         # 尝试通过网页爬取获取MANE Select转录本
@@ -3205,6 +3291,7 @@ class TranscriptSelector:
             }
         
         # 如果网页爬取也失败，返回错误状态
+        diagnosis = kwargs.get('diagnosis', {})
         return {
             'gene': gene_name,
             'gene_id': gene_id,
@@ -3213,7 +3300,8 @@ class TranscriptSelector:
             'database_coverage': {'NCBI_RefSeq': 0, 'Ensembl': 0, 'APPRIS': 0},
             'conflicts': [],
             'error': 'NCBI/Ensembl/APPRIS数据库均未返回有效转录本，且网页爬取失败',
-            'note': '请检查：1)NCBI API配置是否正确 2)基因名称是否正确 3)网络连接状态'
+            'note': '请检查：1)NCBI API配置是否正确 2)基因名称是否正确 3)网络连接状态 4)Streamlit Cloud网络限制',
+            'diagnosis': diagnosis
         }
     
     def _fetch_mane_select_from_web(self, gene_id: str) -> Optional[Dict]:
@@ -3995,6 +4083,54 @@ class HybridAssessmentEngine:
                         'all_transcripts': [],
                         'error': '转录本选择返回None'
                     }
+
+                # 显示详细的诊断信息
+                if tx_selection.get('error') or tx_selection.get('diagnosis'):
+                    with st.expander("⚠️ 转录本获取失败诊断信息", expanded=True):
+                        if tx_selection.get('error'):
+                            st.error(f"**错误**: {tx_selection['error']}")
+                        
+                        if tx_selection.get('diagnosis'):
+                            st.write("**各数据库错误详情**:")
+                            for db, error in tx_selection['diagnosis'].items():
+                                st.error(f"- {db}: {error}")
+                        
+                        st.markdown("""
+                        **可能的原因和解决方案**:
+                        1. **网络限制**: Streamlit Cloud 可能无法访问 NCBI/Ensembl API
+                        2. **API 配置**: 请在侧边栏配置有效的 NCBI API Key 和邮箱
+                        3. **基因ID问题**: 确认基因名称和 Gene ID 正确
+                        4. **服务暂时不可用**: 数据库服务可能正在维护
+                        
+                        **备选方案**:
+                        - 检查 NCBI 网站手动获取转录本信息: https://www.ncbi.nlm.nih.gov/gene/
+                        - 使用 Ensembl 查看转录本: https://www.ensembl.org/
+                        """)
+                        
+                        # 提供手动输入转录本的选项
+                        st.divider()
+                        st.write("**手动输入转录本信息（可选）**:")
+                        manual_tx_id = st.text_input("转录本 ID (如 NM_001123):", key="manual_tx_id")
+                        manual_tx_length = st.number_input("转录本长度 (bp):", min_value=0, max_value=50000, value=0, key="manual_tx_length")
+                        
+                        if manual_tx_id and manual_tx_length > 0:
+                            st.success(f"✓ 将使用手动输入的转录本: {manual_tx_id} ({manual_tx_length}bp)")
+                            # 创建手动转录本数据
+                            tx_selection['selected_transcript'] = {
+                                'id': manual_tx_id,
+                                'score': 0.5,
+                                'info': {
+                                    'source': 'Manual_Input',
+                                    'status': 'MANUAL',
+                                    'length': manual_tx_length,
+                                    'type': 'NM' if manual_tx_id.startswith('NM_') else 'XM',
+                                    'title': f'{manual_tx_id} (手动输入)'
+                                },
+                                'reasons': ['用户手动输入的转录本信息']
+                            }
+                            tx_selection['all_transcripts'] = [tx_selection['selected_transcript']]
+                            tx_selection['error'] = None  # 清除错误状态
+                            tx_selection['diagnosis'] = None
 
                 if tx_selection.get('needs_confirmation') and tx_selection.get('conflicts'):
                     st.warning("检测到多个高评分转录本，请选择您需要过表达的特定转录本（已优先选择NM，过滤XM）：")
@@ -4829,10 +4965,11 @@ def render_results(result: Dict):
                         if 'cell_models' in oe and oe['cell_models']:
                             st.markdown("**细胞模型:**")
                             for model in oe['cell_models']:
-                                st.markdown(f"""
-                                    - **{model.get('cell_line', 'N/A')}**: {model.get('phenotype', 'N/A')}
-                                    *机制*: {model.get('mechanism', 'N/A')} | *文献*: {model.get('reference', 'N/A')}
-                                """)
+                                st.markdown(f"**• {model.get('cell_line', 'N/A')}**")
+                                st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
+                                st.markdown(f"  - 机制: {model.get('mechanism', 'N/A')}")
+                                st.markdown(f"  - 文献: {model.get('reference', 'N/A')}")
+                                st.markdown("---")
                         if 'summary' in oe:
                             st.success(f"**总结**: {oe['summary']}")
 
@@ -4842,10 +4979,11 @@ def render_results(result: Dict):
                         if 'cell_models' in ko and ko['cell_models']:
                             st.markdown("**细胞模型:**")
                             for model in ko['cell_models']:
-                                st.markdown(f"""
-                                    - **{model.get('cell_line', 'N/A')}** ({model.get('method', '')}): {model.get('phenotype', 'N/A')}
-                                    *细胞活力*: {model.get('viability', 'N/A')}
-                                """)
+                                st.markdown(f"**• {model.get('cell_line', 'N/A')}** ({model.get('method', '')})")
+                                st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
+                                st.markdown(f"  - 细胞活力: {model.get('viability', 'N/A')}")
+                                st.markdown(f"  - 文献: {model.get('reference', 'N/A')}")
+                                st.markdown("---")
                         if 'summary' in ko:
                             st.success(f"**总结**: {ko['summary']}")
 
