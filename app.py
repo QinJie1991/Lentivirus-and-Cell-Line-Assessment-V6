@@ -582,6 +582,7 @@ class AIAnalysisClient:
 
         prompt = f"""作为分子生物学和遗传学专家，请基于以下文献信息，全面总结基因"{gene_name}"（{gene_description}）的功能及实验模型数据。
 
+【重要】你只能基于以下提供的真实文献进行总结，严禁编造任何文献、数据或PMID：
 {literature_text}
 
 请按以下JSON格式提供结构化总结（只返回JSON）：
@@ -599,14 +600,14 @@ class AIAnalysisClient:
                 "cell_line": "细胞系名称",
                 "phenotype": "观察到的表型（如：促进增殖、诱导凋亡、EMT转化等）",
                 "mechanism": "分子机制",
-                "reference": "文献来源（作者, 年份, 期刊）"
+                "reference": "文献来源（仅限上述提供的文献，注明PMID）"
             }}
         ],
         "animal_models": [
             {{
                 "model": "动物模型（如：转基因小鼠、尾静脉注射等）",
                 "phenotype": "表型",
-                "reference": "文献来源"
+                "reference": "文献来源（仅限上述提供的文献）"
             }}
         ],
         "summary": "过表达效应的总体特征"
@@ -617,7 +618,7 @@ class AIAnalysisClient:
                 "cell_line": "细胞系",
                 "method": "敲低方法（siRNA/shRNA）",
                 "phenotype": "表型",
-                "reference": "文献来源"
+                "reference": "文献来源（仅限上述提供的文献）"
             }}
         ],
         "summary": "敲低效应的总体特征"
@@ -629,7 +630,7 @@ class AIAnalysisClient:
                 "method": "敲除方法（CRISPR/TALEN）",
                 "phenotype": "表型",
                 "viability": "是否影响细胞活力",
-                "reference": "文献来源"
+                "reference": "文献来源（仅限上述提供的文献）"
             }}
         ],
         "animal_models": [
@@ -637,7 +638,7 @@ class AIAnalysisClient:
                 "model": "动物模型",
                 "phenotype": "表型（如：胚胎致死、发育缺陷、代谢异常等）",
                 "lethality": "致死性",
-                "reference": "文献来源"
+                "reference": "文献来源（仅限上述提供的文献）"
             }}
         ],
         "summary": "敲除效应的总体特征"
@@ -648,16 +649,17 @@ class AIAnalysisClient:
         "therapeutic_potential": "治疗潜力评估"
     }},
     "key_references": [
-        "格式：作者 et al., 年份, 期刊, PMID（仅列出最关键3-5篇）"
+        "格式：仅列出上述提供的文献中最重要的3-5篇，格式：作者 et al., 年份, 期刊, PMID"
     ],
     "experimental_notes": "实验设计建议（如：敲除是否致死、过表达是否诱导凋亡等注意事项）"
 }}
 
-要求：
-1. 基于提供的文献如实总结，没有的数据标注"未见报道"
-2. 区分细胞水平和动物水平的数据
-3. 重点关注与慢病毒包装相关的因素（如：是否影响细胞活力、是否调控病毒相关通路）
-4. 文献格式要规范，包含PMID"""
+严格要求：
+1. 【禁止编造】你只能基于上面提供的文献信息进行总结，没有的数据必须标注"未见报道"或"文献未提供"
+2. 【引用限制】所有reference字段只能引用上面提供的真实文献，必须包含准确的PMID
+3. 【无文献则无引用】如果某条信息不是来自提供的文献，不要编造引用，直接标注"未见报道"即可
+4. 区分细胞水平和动物水平的数据
+5. 重点关注与慢病毒包装相关的因素（如：是否影响细胞活力、是否调控病毒相关通路）"""
 
         try:
             headers = {
@@ -668,7 +670,7 @@ class AIAnalysisClient:
                 'model': 'qwen-turbo',
                 'input': {
                     'messages': [
-                        {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析，擅长从文献中提取关键实验数据。'},
+                        {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析。你只能基于用户提供的文献进行总结，绝对禁止编造任何文献、PMID、作者或期刊信息。如果信息不确定，明确标注"未见报道"。'},
                         {'role': 'user', 'content': prompt}
                     ]
                 },
@@ -711,10 +713,16 @@ class AIAnalysisClient:
         try:
             prompt = f"""作为RNAi序列设计专家，请为基因"{gene_name}"（Gene ID: {gene_id}, 描述: {gene_description}）设计siRNA/shRNA序列。
 
-请基于最新的文献和公开数据库知识，提供：
+请基于公认的RNAi设计原则和公开数据库知识，提供：
 1. 3条高质量的siRNA靶序列（19-21nt，不包含悬垂端）
 2. 每条序列的设计依据（靶向哪个外显子、GC含量等）
-3. 支持这些设计的参考文献或专利（真实存在的文献，优先选择高被引文献或经典方法论论文）
+3. 支持这些设计的参考文献（【严格要求】必须是真实存在的经典文献，如Elbashir 2001 Nature, Reynolds 2004 Nature Biotechnology等公认的RNAi设计指南）
+
+【重要】你必须遵守以下规范：
+- 参考文献必须是真实存在的、可验证的文献
+- 优先引用RNAi领域的经典方法论文（如：Elbashir et al. 2001, Reynolds et al. 2004, Ui-Tei et al. 2004等）
+- 不要编造任何作者、年份或期刊信息
+- 如果不确定某篇文献是否存在，只引用你最确定的真实文献
 
 请按以下JSON格式回答（只返回JSON）：
 {{
@@ -747,10 +755,10 @@ class AIAnalysisClient:
     "validation_method": "Western blot或qPCR检测mRNA水平，建议检测时间点在转染后48-72小时"
 }}
 
-要求：
-1. 序列必须是真实的、经过验证的设计原则
-2. 参考文献必须是真实存在的（2000-2024年间）
-3. 如该基因有已发表的有效siRNA序列（如来自Dharmacon、Sigma等数据库的验证序列），请优先列出
+严格要求：
+1. 序列必须是真实的、经过验证的设计原则（Ui-Tei规则、Reynolds标准等）
+2. 参考文献必须是你确定真实存在的经典文献（2000-2024年间）
+3. 如果不确定某条文献是否存在，宁可不引用也不要编造
 4. 提供具体的载体构建建议"""
 
             headers = {
@@ -1397,6 +1405,10 @@ class AIAnalysisClient:
 
 # ==================== 核心数据库（第一层） ====================
 class CoreDatabases:
+    """核心基因数据库 - 包含已发表的文献支持的基因分类
+    
+    注意：以下PMID基于已发表的科学文献，但用户应通过PubMed验证最新信息
+    """
     CORE_ESSENTIAL = {
         'ACTB': ('PMID:30971823', 'DepMap核心必需', '细胞骨架结构蛋白'),
         'GAPDH': ('PMID:30971823', 'DepMap核心必需', '糖酵解关键酶'),
@@ -3154,8 +3166,45 @@ class TranscriptSelector:
         return merged
 
     def _create_fallback_transcript(self, gene_name: str, gene_id: str) -> Optional[Dict]:
-        """当所有数据库都失败时，返回明确的错误状态，不进行任何推测"""
-        # 直接返回错误状态，不创建任何推测数据
+        """当所有数据库都失败时，尝试通过NCBI Datasets网页爬取MANE Select转录本"""
+        
+        # 尝试通过网页爬取获取MANE Select转录本
+        mane_transcript = self._fetch_mane_select_from_web(gene_id)
+        
+        if mane_transcript:
+            return {
+                'gene': gene_name,
+                'gene_id': gene_id,
+                'selected_transcript': {
+                    'id': mane_transcript['id'],
+                    'score': 0.5,
+                    'info': {
+                        'source': 'NCBI_Datasets_Web',
+                        'status': 'MANE_Select',
+                        'length': mane_transcript['length'],
+                        'type': 'NM',
+                        'title': f"{mane_transcript['id']} (MANE Select)"
+                    },
+                    'reasons': [f"MANE Select转录本（网页爬取）", f"长度: {mane_transcript['length']}bp"]
+                },
+                'all_transcripts': [{
+                    'id': mane_transcript['id'],
+                    'score': 0.5,
+                    'info': {
+                        'source': 'NCBI_Datasets_Web',
+                        'status': 'MANE_Select',
+                        'length': mane_transcript['length'],
+                        'type': 'NM',
+                        'title': f"{mane_transcript['id']} (MANE Select)"
+                    },
+                    'reasons': [f"MANE Select转录本（网页爬取）", f"长度: {mane_transcript['length']}bp"]
+                }],
+                'database_coverage': {'NCBI_RefSeq': 0, 'Ensembl': 0, 'APPRIS': 0, 'NCBI_Datasets_Web': 1},
+                'conflicts': [],
+                'note': '通过NCBI Datasets网页爬取获得MANE Select转录本'
+            }
+        
+        # 如果网页爬取也失败，返回错误状态
         return {
             'gene': gene_name,
             'gene_id': gene_id,
@@ -3163,9 +3212,224 @@ class TranscriptSelector:
             'all_transcripts': [],
             'database_coverage': {'NCBI_RefSeq': 0, 'Ensembl': 0, 'APPRIS': 0},
             'conflicts': [],
-            'error': 'NCBI/Ensembl/APPRIS数据库均未返回有效转录本',
+            'error': 'NCBI/Ensembl/APPRIS数据库均未返回有效转录本，且网页爬取失败',
             'note': '请检查：1)NCBI API配置是否正确 2)基因名称是否正确 3)网络连接状态'
         }
+    
+    def _fetch_mane_select_from_web(self, gene_id: str) -> Optional[Dict]:
+        """通过NCBI Datasets网页爬取MANE Select转录本信息
+        
+        访问: https://www.ncbi.nlm.nih.gov/datasets/gene/gene{id}/#transcripts-and-proteins
+        提取标注为"MANE Select"的转录本的Length(nt)
+        """
+        import requests
+        import re
+        
+        # 尝试导入 BeautifulSoup，如果失败则使用正则备选方案
+        try:
+            from bs4 import BeautifulSoup
+            HAS_BS4 = True
+        except ImportError:
+            HAS_BS4 = False
+            logger.warning("BeautifulSoup4 未安装，将使用正则表达式备选方案")
+        
+        if not gene_id or not gene_id.isdigit():
+            logger.warning(f"无效的gene_id: {gene_id}")
+            return None
+        
+        url = f"https://www.ncbi.nlm.nih.gov/datasets/gene/{gene_id}/"
+        
+        try:
+            logger.info(f"尝试从NCBI Datasets网页获取MANE Select: {url}")
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            html_content = response.text
+            
+            # 如果有 BeautifulSoup，使用它解析
+            if HAS_BS4:
+                return self._parse_mane_with_bs4(html_content, gene_id)
+            else:
+                # 使用正则表达式备选方案
+                return self._parse_mane_with_regex(html_content, gene_id)
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"请求NCBI Datasets网页失败: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"解析NCBI Datasets网页失败: {e}")
+            return None
+    
+    def _parse_mane_with_bs4(self, html_content: str, gene_id: str) -> Optional[Dict]:
+        """使用BeautifulSoup解析MANE Select信息"""
+        from bs4 import BeautifulSoup
+        import re
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # 方法1: 查找所有包含"MANE Select"文本的元素
+        for element in soup.find_all(text=re.compile('MANE Select', re.IGNORECASE)):
+            parent = element.parent
+            
+            # 向上查找包含转录本信息的父元素
+            for _ in range(5):  # 最多向上查找5层
+                if parent:
+                    # 查找转录本ID (NM_或XM_开头)
+                    parent_text = parent.get_text()
+                    
+                    # 查找转录本ID
+                    tx_match = re.search(r'(NM_\d+(\.\d+)?)', parent_text)
+                    if not tx_match:
+                        tx_match = re.search(r'(XM_\d+(\.\d+)?)', parent_text)
+                    
+                    if tx_match:
+                        transcript_id = tx_match.group(1)
+                        
+                        # 查找长度信息 - 多种可能的格式
+                        length = None
+                        
+                        # 尝试匹配 "Length: 1234 nt" 或 "Length(nt): 1234"
+                        length_match = re.search(r'Length[:\s\(]*(?:nt)?[:\s\)]*(\d+)', parent_text, re.IGNORECASE)
+                        if length_match:
+                            length = int(length_match.group(1))
+                        
+                        # 尝试匹配 "1234 bp" 或 "1234 nt"
+                        if not length:
+                            length_match = re.search(r'(\d+)\s*(?:bp|nt|nucleotides?)', parent_text, re.IGNORECASE)
+                            if length_match:
+                                length = int(length_match.group(1))
+                        
+                        # 如果在当前元素没找到长度，尝试在兄弟元素或表格中查找
+                        if not length:
+                            # 查找表格行
+                            row = parent.find_parent('tr') if hasattr(parent, 'find_parent') else None
+                            if row:
+                                row_text = row.get_text()
+                                length_match = re.search(r'(\d+)', row_text.replace(',', ''))
+                                if length_match:
+                                    potential_length = int(length_match.group(1))
+                                    if 100 < potential_length < 50000:  # 合理的转录本长度范围
+                                        length = potential_length
+                        
+                        if transcript_id and length:
+                            logger.info(f"找到MANE Select转录本: {transcript_id}, 长度: {length}bp")
+                            return {
+                                'id': transcript_id,
+                                'length': length,
+                                'source': 'MANE_Select'
+                            }
+                    
+                    parent = parent.parent
+        
+        # 方法2: 查找所有表格，寻找包含MANE Select信息的行
+        tables = soup.find_all('table')
+        for table in tables:
+            rows = table.find_all('tr')
+            for row in rows:
+                row_text = row.get_text()
+                if 'MANE Select' in row_text or 'MANE' in row_text:
+                    # 查找转录本ID
+                    tx_match = re.search(r'(NM_\d+(\.\d+)?)', row_text)
+                    if not tx_match:
+                        tx_match = re.search(r'(XM_\d+(\.\d+)?)', row_text)
+                    
+                    if tx_match:
+                        transcript_id = tx_match.group(1)
+                        
+                        # 尝试从行中提取长度
+                        cells = row.find_all(['td', 'th'])
+                        for cell in cells:
+                            cell_text = cell.get_text().replace(',', '')
+                            # 查找数字
+                            num_match = re.search(r'^(\d+)$', cell_text.strip())
+                            if num_match:
+                                potential_length = int(num_match.group(1))
+                                if 100 < potential_length < 50000:
+                                    logger.info(f"从表格找到MANE Select转录本: {transcript_id}, 长度: {potential_length}bp")
+                                    return {
+                                        'id': transcript_id,
+                                        'length': potential_length,
+                                        'source': 'MANE_Select'
+                                    }
+        
+        logger.warning(f"未在NCBI Datasets网页找到MANE Select转录本 (gene_id: {gene_id})")
+        return None
+    
+    def _parse_mane_with_regex(self, html_content: str, gene_id: str) -> Optional[Dict]:
+        """使用正则表达式解析MANE Select信息（备选方案）"""
+        import re
+        
+        # 清理HTML标签以便更好地搜索
+        text_content = re.sub(r'<script[^>]*>.*?</script>', ' ', html_content, flags=re.DOTALL)
+        text_content = re.sub(r'<style[^>]*>.*?</style>', ' ', text_content, flags=re.DOTALL)
+        text_content = re.sub(r'<[^>]+>', ' ', text_content)
+        text_content = re.sub(r'\s+', ' ', text_content)
+        
+        # 查找包含MANE Select的区域
+        # 尝试匹配 "MANE Select" 附近的转录本信息
+        mane_patterns = [
+            # 模式1: MANE Select 后跟转录本ID和长度
+            r'MANE Select.*?((?:NM|XM)_\d+(?:\.\d+)?).*?(\d{3,5})\s*(?:bp|nt|nucleotides?)',
+            # 模式2: 转录本ID后跟MANE Select，然后是长度
+            r'((?:NM|XM)_\d+(?:\.\d+)?).*?MANE Select.*?(\d{3,5})\s*(?:bp|nt|nucleotides?)',
+            # 模式3: 表格格式，查找有MANE字样的行
+            r'MANE[^\n]*?((?:NM|XM)_\d+(?:\.\d+)?)[^\n]*?(\d{3,5})',
+        ]
+        
+        for pattern in mane_patterns:
+            matches = re.findall(pattern, text_content, re.IGNORECASE | re.DOTALL)
+            for match in matches:
+                transcript_id = match[0]
+                try:
+                    length = int(match[1])
+                    if 100 < length < 50000:
+                        logger.info(f"[正则] 找到MANE Select转录本: {transcript_id}, 长度: {length}bp")
+                        return {
+                            'id': transcript_id,
+                            'length': length,
+                            'source': 'MANE_Select'
+                        }
+                except (ValueError, IndexError):
+                    continue
+        
+        # 如果上面的模式没找到，尝试更宽松的匹配
+        # 先找MANE Select，然后在其附近找NM_开头的ID和数字
+        mane_positions = [m.start() for m in re.finditer(r'MANE', text_content, re.IGNORECASE)]
+        
+        for pos in mane_positions:
+            # 提取MANE附近的一段文本
+            start = max(0, pos - 500)
+            end = min(len(text_content), pos + 500)
+            nearby_text = text_content[start:end]
+            
+            # 查找转录本ID
+            tx_match = re.search(r'(NM_\d+(?:\.\d+)?)', nearby_text)
+            if not tx_match:
+                tx_match = re.search(r'(XM_\d+(?:\.\d+)?)', nearby_text)
+            
+            if tx_match:
+                transcript_id = tx_match.group(1)
+                
+                # 在附近查找长度（通常是3-5位的数字）
+                length_matches = re.findall(r'\b(\d{3,5})\b', nearby_text)
+                for lm in length_matches:
+                    length = int(lm)
+                    if 300 < length < 15000:  # 更严格的合理范围
+                        logger.info(f"[正则备选] 找到MANE Select转录本: {transcript_id}, 长度: {length}bp")
+                        return {
+                            'id': transcript_id,
+                            'length': length,
+                            'source': 'MANE_Select'
+                        }
+        
+        logger.warning(f"[正则] 未找到MANE Select转录本 (gene_id: {gene_id})")
+        return None
 
     def _calculate_transcript_score(self, tx_info: Dict, cell_line: Optional[str]) -> Tuple[float, List[str]]:
         # 防御性检查：如果 tx_info 为 None，返回默认分数
@@ -3835,6 +4099,32 @@ class HybridAssessmentEngine:
                         papers_ko=papers_ko,
                         papers_general=papers_general
                     )
+                    
+                    # 验证 AI 返回的引用是否来自真实检索的文献
+                    all_retrieved_pmids = set()
+                    for p in papers_general + papers_oe + papers_kd + papers_ko:
+                        pmid = p.get('pmid', '')
+                        if pmid:
+                            all_retrieved_pmids.add(str(pmid))
+                    
+                    # 过滤 AI 生成的虚假引用
+                    if 'key_references' in function_analysis:
+                        valid_refs = []
+                        for ref in function_analysis['key_references']:
+                            # 提取引用中的 PMID
+                            import re
+                            pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
+                            if pmid_match:
+                                ref_pmid = pmid_match.group(1)
+                                if ref_pmid in all_retrieved_pmids:
+                                    valid_refs.append(ref)
+                                else:
+                                    logger.warning(f"AI 生成了未检索到的 PMID: {ref_pmid}")
+                            else:
+                                # 没有 PMID 的引用也保留，但标记为未验证
+                                valid_refs.append(ref + " (未验证)")
+                        function_analysis['key_references'] = valid_refs
+                        function_analysis['references_verified'] = True
 
                     result['gene_function_analysis'] = {
                         'data': function_analysis,
@@ -4568,6 +4858,11 @@ def render_results(result: Dict):
 
                 if 'key_references' in data and data['key_references']:
                     with st.expander("关键参考文献"):
+                        st.caption("⚠️ **注意**：以下引用由AI基于检索到的文献生成")
+                        if data.get('references_verified'):
+                            st.success("✓ 引用已验证（PMID与检索结果匹配）")
+                        else:
+                            st.warning("⚠️ 引用未完全验证，请通过PubMed核实")
                         for ref in data['key_references']:
                             st.markdown(f"- {ref}")
 
@@ -4979,6 +5274,7 @@ def render_results(result: Dict):
                                     refs = seq.get('references', [])
                                     if refs:
                                         st.write("**参考文献**:")
+                                        st.caption("⚠️ 以下引用由AI生成，请通过PubMed核实其真实性")
                                         for ref in refs:
                                             st.markdown(f"- *{ref.get('title', '')}* ({ref.get('year', '')}) [{ref.get('pmid_or_patent', '')}]({ref.get('url', '')})")
 
