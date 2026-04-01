@@ -600,14 +600,14 @@ class AIAnalysisClient:
                 "cell_line": "细胞系名称",
                 "phenotype": "观察到的表型（如：促进增殖、诱导凋亡、EMT转化等）",
                 "mechanism": "分子机制",
-                "reference": "文献来源（仅限上述提供的文献，注明PMID）"
+                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
             }}
         ],
         "animal_models": [
             {{
                 "model": "动物模型（如：转基因小鼠、尾静脉注射等）",
                 "phenotype": "表型",
-                "reference": "文献来源（仅限上述提供的文献）"
+                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
             }}
         ],
         "summary": "过表达效应的总体特征"
@@ -618,7 +618,7 @@ class AIAnalysisClient:
                 "cell_line": "细胞系",
                 "method": "敲低方法（siRNA/shRNA）",
                 "phenotype": "表型",
-                "reference": "文献来源（仅限上述提供的文献）"
+                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
             }}
         ],
         "summary": "敲低效应的总体特征"
@@ -630,7 +630,7 @@ class AIAnalysisClient:
                 "method": "敲除方法（CRISPR/TALEN）",
                 "phenotype": "表型",
                 "viability": "是否影响细胞活力",
-                "reference": "文献来源（仅限上述提供的文献）"
+                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
             }}
         ],
         "animal_models": [
@@ -638,7 +638,7 @@ class AIAnalysisClient:
                 "model": "动物模型",
                 "phenotype": "表型（如：胚胎致死、发育缺陷、代谢异常等）",
                 "lethality": "致死性",
-                "reference": "文献来源（仅限上述提供的文献）"
+                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
             }}
         ],
         "summary": "敲除效应的总体特征"
@@ -5050,18 +5050,20 @@ def render_results(result: Dict):
                 
                 # 检查是否有任何功能数据
                 has_any_data = any([
-                    'protein_function' in data,
-                    'overexpression' in data,
-                    'knockdown' in data,
-                    'knockout' in data,
-                    'disease_relevance' in data
+                    'protein_function' in data and data['protein_function'],
+                    'overexpression' in data and data['overexpression'],
+                    'knockdown' in data and data['knockdown'],
+                    'knockout' in data and data['knockout'],
+                    'disease_relevance' in data and data['disease_relevance']
                 ])
                 
                 if not has_any_data:
                     st.warning("⚠️ AI分析未返回具体功能数据")
                     st.info("可能原因：1) 检索到的文献数量不足 2) AI返回格式异常 3) 该基因研究较少")
+                    # 显示原始响应用于调试
+                    st.expander("查看AI原始响应").json(data)
 
-                if 'protein_function' in data:
+                if 'protein_function' in data and data['protein_function']:
                     with st.expander("蛋白基础功能", expanded=True):
                         pf = data['protein_function']
                         st.write(f"**蛋白类别**: {pf.get('category', 'N/A')}")
@@ -5070,7 +5072,7 @@ def render_results(result: Dict):
                         st.write(f"**亚细胞定位**: {pf.get('cellular_location', 'N/A')}")
                         st.write(f"**组织表达**: {pf.get('tissue_expression', 'N/A')}")
 
-                if 'overexpression' in data:
+                if 'overexpression' in data and data['overexpression']:
                     with st.expander("过表达效应"):
                         oe = data['overexpression']
                         if 'cell_models' in oe and oe['cell_models']:
@@ -5079,12 +5081,22 @@ def render_results(result: Dict):
                                 st.markdown(f"**• {model.get('cell_line', 'N/A')}**")
                                 st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
                                 st.markdown(f"  - 机制: {model.get('mechanism', 'N/A')}")
-                                st.markdown(f"  - 文献: {model.get('reference', 'N/A')}")
+                                # 改进文献展示
+                                ref = model.get('reference', 'N/A')
+                                if ref and ref != 'N/A':
+                                    # 尝试提取PMID
+                                    import re
+                                    pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
+                                    if pmid_match:
+                                        pmid = pmid_match.group(1)
+                                        st.markdown(f"  - 文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
+                                    else:
+                                        st.markdown(f"  - 文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
                                 st.markdown("---")
-                        if 'summary' in oe:
+                        if 'summary' in oe and oe['summary']:
                             st.success(f"**总结**: {oe['summary']}")
 
-                if 'knockout' in data:
+                if 'knockout' in data and data['knockout']:
                     with st.expander("敲除效应"):
                         ko = data['knockout']
                         if 'cell_models' in ko and ko['cell_models']:
@@ -5093,12 +5105,43 @@ def render_results(result: Dict):
                                 st.markdown(f"**• {model.get('cell_line', 'N/A')}** ({model.get('method', '')})")
                                 st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
                                 st.markdown(f"  - 细胞活力: {model.get('viability', 'N/A')}")
-                                st.markdown(f"  - 文献: {model.get('reference', 'N/A')}")
+                                # 改进文献展示
+                                ref = model.get('reference', 'N/A')
+                                if ref and ref != 'N/A':
+                                    import re
+                                    pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
+                                    if pmid_match:
+                                        pmid = pmid_match.group(1)
+                                        st.markdown(f"  - 文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
+                                    else:
+                                        st.markdown(f"  - 文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
                                 st.markdown("---")
-                        if 'summary' in ko:
+                        if 'summary' in ko and ko['summary']:
                             st.success(f"**总结**: {ko['summary']}")
 
-                if 'disease_relevance' in data:
+                if 'knockdown' in data and data['knockdown']:
+                    with st.expander("敲低效应"):
+                        kd = data['knockdown']
+                        if 'cell_models' in kd and kd['cell_models']:
+                            st.markdown("**细胞模型:**")
+                            for model in kd['cell_models']:
+                                st.markdown(f"**• {model.get('cell_line', 'N/A')}** ({model.get('method', '')})")
+                                st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
+                                # 改进文献展示
+                                ref = model.get('reference', 'N/A')
+                                if ref and ref != 'N/A':
+                                    import re
+                                    pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
+                                    if pmid_match:
+                                        pmid = pmid_match.group(1)
+                                        st.markdown(f"  - 文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
+                                    else:
+                                        st.markdown(f"  - 文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
+                                st.markdown("---")
+                        if 'summary' in kd and kd['summary']:
+                            st.success(f"**总结**: {kd['summary']}")
+
+                if 'disease_relevance' in data and data['disease_relevance']:
                     with st.expander("疾病相关性"):
                         dr = data['disease_relevance']
                         st.write(f"**肿瘤作用**: {dr.get('cancer', 'N/A')}")
@@ -5113,9 +5156,18 @@ def render_results(result: Dict):
                         else:
                             st.warning("⚠️ 引用未完全验证，请通过PubMed核实")
                         for ref in data['key_references']:
-                            st.markdown(f"- {ref}")
+                            # 尝试提取PMID并添加链接
+                            import re
+                            pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
+                            if pmid_match:
+                                pmid = pmid_match.group(1)
+                                # 移除 (未验证) 标记，添加链接
+                                clean_ref = re.sub(r'\s*\(未验证\)\s*$', '', str(ref))
+                                st.markdown(f"- [{clean_ref}](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
+                            else:
+                                st.markdown(f"- {ref}")
 
-                if 'experimental_notes' in data:
+                if 'experimental_notes' in data and data['experimental_notes']:
                     st.info(f"**实验设计建议**: {data['experimental_notes']}")
             else:
                 st.info("正在加载基因功能分析数据...")
