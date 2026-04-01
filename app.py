@@ -3506,85 +3506,96 @@ class GeneInputComponent:
             
             st.divider()
             
-            # ===== 第三行：RNA表达与抗体 =====
-            col3_1, col3_2 = st.columns(2)
+            # ===== 第三行：RNA表达数据（整合为单一表格）=====
+            st.markdown("#### 📊 RNA表达数据")
             
-            with col3_1:
-                # e. RNA表达与定位
-                st.markdown("#### 📊 RNA表达与定位")
-                rna_exp = gene_info.get('rna_expression', {})
-                if rna_exp.get('tissue_specificity'):
-                    st.markdown(f"**组织特异性:** {rna_exp['tissue_specificity']}")
-                    if rna_exp.get('tissue_specific_ntpm'):
-                        st.caption(f"nTPM: {rna_exp['tissue_specific_ntpm']}")
-                else:
-                    st.markdown("*暂无RNA表达数据*")
+            # 收集所有RNA表达数据
+            rna_exp = gene_info.get('rna_expression', {})
+            dist = gene_info.get('rna_distribution', {})
             
-            with col3_2:
-                # f. 抗体推荐
-                st.markdown("#### 🧪 抗体推荐")
-                antibody = gene_info.get('antibody', {})
-                if antibody.get('name'):
-                    antibody_name = antibody['name']
-                    # 优先使用搜索该抗体的链接
-                    hpa_url = antibody.get('hpa_search_url') or antibody.get('hpa_gene_url', '')
-                    st.markdown(f"**产品名称:** [{antibody_name}]({hpa_url})")
-                    st.caption(f"[在HPA数据库中查看抗体详情]({hpa_url})")
+            # 构建RNA表达表格数据
+            rna_table_data = []
+            
+            # 组织数据
+            tissue = dist.get('tissue', {})
+            tissue_specificity = tissue.get('specificity') or rna_exp.get('tissue_specificity', '')
+            tissue_ntpm = tissue.get('specific_ntpm') or rna_exp.get('tissue_specific_ntpm', '')
+            if tissue_specificity:
+                rna_table_data.append({
+                    "样本类型": "🧬 组织",
+                    "表达特异性": tissue_specificity,
+                    "表达量": f"nTPM: {tissue_ntpm}" if tissue_ntpm else "-"
+                })
+            
+            # 单细胞数据
+            sc = dist.get('single_cell', {})
+            if sc.get('specificity'):
+                rna_table_data.append({
+                    "样本类型": "🔬 单细胞",
+                    "表达特异性": sc['specificity'],
+                    "表达量": f"nCPM: {sc['specific_ncpm']}" if sc.get('specific_ncpm') else "-"
+                })
+            
+            # 肿瘤数据
+            cancer = dist.get('cancer', {})
+            if cancer.get('specificity'):
+                rna_table_data.append({
+                    "样本类型": "⚕️ 肿瘤",
+                    "表达特异性": cancer['specificity'],
+                    "表达量": f"pTPM: {cancer['specific_ptpm']}" if cancer.get('specific_ptpm') else "-"
+                })
+            
+            # 血细胞数据
+            blood = dist.get('blood', {})
+            if blood.get('specificity'):
+                rna_table_data.append({
+                    "样本类型": "🩸 血细胞",
+                    "表达特异性": blood['specificity'],
+                    "表达量": f"nTPM: {blood['specific_ntpm']}" if blood.get('specific_ntpm') else "-"
+                })
+            
+            if rna_table_data:
+                df_rna = pd.DataFrame(rna_table_data)
+                st.table(df_rna)
+                
+                # 数据解读结论
+                st.markdown("**📌 数据解读**")
+                interpretations = []
+                high_expression_tissues = []
+                for row in rna_table_data:
+                    spec = row["表达特异性"].lower()
+                    if any(x in spec for x in ["high", "highly", "富集", "高"]):
+                        high_expression_tissues.append(row["样本类型"])
+                
+                if high_expression_tissues:
+                    interpretations.append(f"该基因在 {', '.join(high_expression_tissues)} 中高表达，提示其在相应组织/细胞类型中可能发挥重要功能。")
+                
+                # 检查组织特异性程度
+                specific_count = sum(1 for row in rna_table_data if any(x in row["表达特异性"].lower() for x in ["specific", "特异性", "富集"]))
+                if specific_count == len(rna_table_data):
+                    interpretations.append("该基因在所有检测样本类型中均呈现特异性表达模式，属于组织特异性基因。")
+                elif specific_count == 0:
+                    interpretations.append("该基因表达较为广泛，在各样本类型中均有基础水平表达。")
                 else:
-                    st.markdown("*暂无抗体推荐*")
+                    interpretations.append("该基因呈现部分组织特异性表达，在某些特定组织/细胞类型中表达水平显著更高。")
+                
+                for interp in interpretations:
+                    st.markdown(f"- {interp}")
+            else:
+                st.info("*暂无RNA表达数据*")
             
             st.divider()
             
-            # ===== 第四行：RNA在不同样本中的表达 =====
-            st.markdown("#### 📈 RNA在不同样本中的表达")
-            dist = gene_info.get('rna_distribution', {})
-            
-            dist_cols = st.columns(4)
-            
-            # g. RNA在不同组织、细胞、肿瘤和血细胞中的表达
-            # 组织
-            tissue = dist.get('tissue', {})
-            with dist_cols[0]:
-                st.markdown("**🧬 组织**")
-                if tissue.get('specificity'):
-                    st.markdown(f"{tissue['specificity']}")
-                    if tissue.get('specific_ntpm'):
-                        st.caption(f"nTPM: {tissue['specific_ntpm']}")
-                else:
-                    st.caption("-")
-            
-            # 单细胞
-            sc = dist.get('single_cell', {})
-            with dist_cols[1]:
-                st.markdown("**🔬 单细胞**")
-                if sc.get('specificity'):
-                    st.markdown(f"{sc['specificity']}")
-                    if sc.get('specific_ncpm'):
-                        st.caption(f"nCPM: {sc['specific_ncpm']}")
-                else:
-                    st.caption("-")
-            
-            # 肿瘤
-            cancer = dist.get('cancer', {})
-            with dist_cols[2]:
-                st.markdown("**⚕️ 肿瘤**")
-                if cancer.get('specificity'):
-                    st.markdown(f"{cancer['specificity']}")
-                    if cancer.get('specific_ptpm'):
-                        st.caption(f"pTPM: {cancer['specific_ptpm']}")
-                else:
-                    st.caption("-")
-            
-            # 血细胞
-            blood = dist.get('blood', {})
-            with dist_cols[3]:
-                st.markdown("**🩸 血细胞**")
-                if blood.get('specificity'):
-                    st.markdown(f"{blood['specificity']}")
-                    if blood.get('specific_ntpm'):
-                        st.caption(f"nTPM: {blood['specific_ntpm']}")
-                else:
-                    st.caption("-")
+            # ===== 第四行：抗体推荐 =====
+            st.markdown("#### 🧪 抗体推荐")
+            antibody = gene_info.get('antibody', {})
+            if antibody.get('name'):
+                antibody_name = antibody['name']
+                hpa_url = antibody.get('hpa_search_url') or antibody.get('hpa_gene_url', '')
+                st.markdown(f"**产品名称:** [{antibody_name}]({hpa_url})")
+                st.caption(f"[在HPA数据库中查看抗体详情]({hpa_url})")
+            else:
+                st.markdown("*暂无抗体推荐*")
 
 
 # ==================== 报告导出 ====================
@@ -4592,152 +4603,151 @@ def render_results(result: Dict):
             else:
                 data = gene_details
                 
-                # 1. Ensembl ID
-                with st.container():
-                    st.subheader("🔗 Ensembl ID")
-                    ensembl_id = data.get('ensembl_id', '')
-                    ensembl_url = data.get('ensembl_url', '')
-                    if ensembl_id and ensembl_url:
-                        st.markdown(f"[{ensembl_id}]({ensembl_url})")
-                    elif ensembl_id:
-                        st.write(ensembl_id)
+                # ========== 基础信息表格（Ensembl ID、Uniprot ID、基因组位置、蛋白定位与功能、抗体推荐）==========
+                st.subheader("📋 基因基础信息")
+                
+                # 准备表格数据
+                table_data = []
+                
+                # Ensembl ID
+                ensembl_id = data.get('ensembl_id', 'N/A')
+                ensembl_url = data.get('ensembl_url', '')
+                ensembl_display = f"[{ensembl_id}]({ensembl_url})" if ensembl_id != 'N/A' and ensembl_url else ensembl_id
+                table_data.append({"信息项": "Ensembl ID", "内容": ensembl_display})
+                
+                # Uniprot ID
+                uniprot_id = data.get('uniprot_id', 'N/A')
+                uniprot_url = data.get('uniprot_url', '')
+                uniprot_display = f"[{uniprot_id}]({uniprot_url})" if uniprot_id != 'N/A' and uniprot_url else uniprot_id
+                table_data.append({"信息项": "Uniprot ID", "内容": uniprot_display})
+                
+                # 基因组位置
+                genome_loc = data.get('genome_location', 'N/A')
+                chromosome = data.get('chromosome', '')
+                position = data.get('position', '')
+                ensembl_id = data.get('ensembl_id', '')
+                if genome_loc != 'N/A':
+                    if chromosome and position:
+                        pos_parts = position.replace(',', '').split('-')
+                        start_pos = pos_parts[0] if pos_parts else position.replace(',', '')
+                        ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg38&position=chr{chromosome}:{start_pos}"
                     else:
-                        st.write("N/A")
+                        ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_gene={ensembl_id}"
+                    genome_display = f"`{genome_loc}` [→ UCSC]({ucsc_url})"
+                else:
+                    genome_display = "N/A"
+                table_data.append({"信息项": "基因组位置", "内容": genome_display})
+                
+                # 蛋白定位与功能
+                loc = data.get('protein_localization', {})
+                func = data.get('protein_function', {})
+                protein_info_parts = []
+                if loc.get('subcellular_main'):
+                    protein_info_parts.append(f"主要定位: {loc['subcellular_main']}")
+                if loc.get('subcellular_additional'):
+                    protein_info_parts.append(f"附加定位: {loc['subcellular_additional']}")
+                if loc.get('secretome_location'):
+                    protein_info_parts.append(f"分泌位置: {loc['secretome_location']}")
+                if func.get('biological_process'):
+                    protein_info_parts.append(f"生物过程: {func['biological_process']}")
+                if func.get('molecular_function'):
+                    protein_info_parts.append(f"分子功能: {func['molecular_function']}")
+                protein_display = "; ".join(protein_info_parts) if protein_info_parts else "N/A"
+                table_data.append({"信息项": "蛋白定位与功能", "内容": protein_display})
+                
+                # 抗体推荐
+                antibody = data.get('antibody', {})
+                if antibody.get('name'):
+                    antibody_name = antibody['name']
+                    hpa_url = antibody.get('hpa_search_url') or antibody.get('hpa_gene_url', '')
+                    antibody_display = f"[{antibody_name}]({hpa_url})" if hpa_url else antibody_name
+                else:
+                    antibody_display = "N/A"
+                table_data.append({"信息项": "抗体推荐", "内容": antibody_display})
+                
+                # 显示表格
+                df_basic = pd.DataFrame(table_data)
+                st.markdown(df_basic.to_markdown(index=False), unsafe_allow_html=True)
+                
                 st.divider()
                 
-                # 2. Uniprot ID
-                with st.container():
-                    st.subheader("🔗 Uniprot ID")
-                    uniprot_id = data.get('uniprot_id', '')
-                    uniprot_url = data.get('uniprot_url', '')
-                    if uniprot_id and uniprot_url:
-                        st.markdown(f"[{uniprot_id}]({uniprot_url})")
-                    elif uniprot_id:
-                        st.write(uniprot_id)
+                # ========== RNA表达数据（整合后的单一表格）==========
+                st.subheader("📊 RNA表达数据")
+                
+                # 收集所有RNA表达数据
+                rna = data.get('rna_expression', {})
+                dist = data.get('rna_distribution', {})
+                
+                # 构建RNA表达表格数据
+                rna_table_data = []
+                
+                # 组织数据（合并 tissue 和 rna_expression 中的组织特异性）
+                tissue = dist.get('tissue', {})
+                tissue_specificity = tissue.get('specificity') or rna.get('tissue_specificity', '')
+                tissue_ntpm = tissue.get('specific_ntpm') or rna.get('tissue_specific_ntpm', '')
+                if tissue_specificity:
+                    rna_table_data.append({
+                        "样本类型": "🧬 组织",
+                        "表达特异性": tissue_specificity,
+                        "表达量": f"nTPM: {tissue_ntpm}" if tissue_ntpm else "-"
+                    })
+                
+                # 单细胞数据
+                sc = dist.get('single_cell', {})
+                if sc.get('specificity'):
+                    rna_table_data.append({
+                        "样本类型": "🔬 单细胞",
+                        "表达特异性": sc['specificity'],
+                        "表达量": f"nCPM: {sc['specific_ncpm']}" if sc.get('specific_ncpm') else "-"
+                    })
+                
+                # 肿瘤数据
+                cancer = dist.get('cancer', {})
+                if cancer.get('specificity'):
+                    rna_table_data.append({
+                        "样本类型": "⚕️ 肿瘤",
+                        "表达特异性": cancer['specificity'],
+                        "表达量": f"pTPM: {cancer['specific_ptpm']}" if cancer.get('specific_ptpm') else "-"
+                    })
+                
+                # 血细胞数据
+                blood = dist.get('blood', {})
+                if blood.get('specificity'):
+                    rna_table_data.append({
+                        "样本类型": "🩸 血细胞",
+                        "表达特异性": blood['specificity'],
+                        "表达量": f"nTPM: {blood['specific_ntpm']}" if blood.get('specific_ntpm') else "-"
+                    })
+                
+                if rna_table_data:
+                    df_rna = pd.DataFrame(rna_table_data)
+                    st.table(df_rna)
+                    
+                    # 数据解读结论
+                    st.markdown("**📌 数据解读**")
+                    interpretations = []
+                    high_expression_tissues = []
+                    for row in rna_table_data:
+                        spec = row["表达特异性"].lower()
+                        if any(x in spec for x in ["high", "highly", "富集", "高"]):
+                            high_expression_tissues.append(row["样本类型"])
+                    
+                    if high_expression_tissues:
+                        interpretations.append(f"该基因在 {', '.join(high_expression_tissues)} 中高表达，提示其在相应组织/细胞类型中可能发挥重要功能。")
+                    
+                    # 检查组织特异性程度
+                    specific_count = sum(1 for row in rna_table_data if any(x in row["表达特异性"].lower() for x in ["specific", "特异性", "富集"]))
+                    if specific_count == len(rna_table_data):
+                        interpretations.append("该基因在所有检测样本类型中均呈现特异性表达模式，属于组织特异性基因。")
+                    elif specific_count == 0:
+                        interpretations.append("该基因表达较为广泛，在各样本类型中均有基础水平表达。")
                     else:
-                        st.write("N/A")
-                st.divider()
-                
-                # 3. 基因组位置
-                with st.container():
-                    st.subheader("🧬 基因组位置")
-                    genome_loc = data.get('genome_location', '')
-                    chromosome = data.get('chromosome', '')
-                    position = data.get('position', '')
-                    ensembl_id = data.get('ensembl_id', '')
-                    if genome_loc:
-                        # UCSC 链接使用染色体和位置
-                        if chromosome and position:
-                            # 解析位置，获取起始位置
-                            pos_parts = position.replace(',', '').split('-')
-                            start_pos = pos_parts[0] if pos_parts else position.replace(',', '')
-                            ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgTracks?db=hg38&position=chr{chromosome}:{start_pos}"
-                        else:
-                            ucsc_url = f"https://genome.ucsc.edu/cgi-bin/hgGene?hgg_gene={ensembl_id}"
-                        st.markdown(f"`{genome_loc}` [→ UCSC]({ucsc_url})")
-                    else:
-                        st.write("N/A")
-                st.divider()
-                
-                # 4. 蛋白定位与功能
-                with st.container():
-                    st.subheader("🎯 蛋白定位与功能")
-                    loc = data.get('protein_localization', {})
-                    func = data.get('protein_function', {})
+                        interpretations.append("该基因呈现部分组织特异性表达，在某些特定组织/细胞类型中表达水平显著更高。")
                     
-                    if loc.get('subcellular_main'):
-                        st.write(f"**主要定位**: {loc['subcellular_main']}")
-                    if loc.get('subcellular_additional'):
-                        st.write(f"**附加定位**: {loc['subcellular_additional']}")
-                    if loc.get('secretome_location'):
-                        st.write(f"**分泌位置**: {loc['secretome_location']}")
-                    if loc.get('secretome_function'):
-                        st.write(f"**分泌功能**: {loc['secretome_function']}")
-                    if func.get('biological_process'):
-                        st.write(f"**生物过程**: {func['biological_process']}")
-                    if func.get('molecular_function'):
-                        st.write(f"**分子功能**: {func['molecular_function']}")
-                    if func.get('disease_involvement'):
-                        st.write(f"**疾病相关**: {func['disease_involvement']}")
-                st.divider()
-                
-                # 5. RNA表达与定位
-                with st.container():
-                    st.subheader("📊 RNA表达与定位")
-                    rna = data.get('rna_expression', {})
-                    if rna.get('tissue_specificity'):
-                        st.write(f"**组织特异性**: {rna['tissue_specificity']}")
-                    if rna.get('tissue_specific_ntpm'):
-                        st.write(f"**组织特异性nTPM**: {rna['tissue_specific_ntpm']}")
-                st.divider()
-                
-                # 6. 抗体推荐
-                with st.container():
-                    st.subheader("🧪 抗体推荐")
-                    antibody = data.get('antibody', {})
-                    if antibody.get('name'):
-                        antibody_name = antibody['name']
-                        # 优先使用搜索该抗体的链接
-                        hpa_url = antibody.get('hpa_search_url') or antibody.get('hpa_gene_url', '')
-                        if hpa_url:
-                            st.markdown(f"[{antibody_name}]({hpa_url})")
-                        else:
-                            st.write(antibody_name)
-                    else:
-                        st.write("N/A")
-                st.divider()
-                
-                # 7. RNA在四种样本中的表达
-                with st.container():
-                    st.subheader("📈 RNA在不同样本中的表达")
-                    dist = data.get('rna_distribution', {})
-                    
-                    # 使用4列布局展示四组数据
-                    rna_cols = st.columns(4)
-                    
-                    # 组织
-                    tissue = dist.get('tissue', {})
-                    with rna_cols[0]:
-                        st.markdown("**🧬 组织**")
-                        if tissue.get('specificity'):
-                            st.write(f"{tissue['specificity']}")
-                            if tissue.get('specific_ntpm'):
-                                st.caption(f"nTPM: {tissue['specific_ntpm']}")
-                        else:
-                            st.write("N/A")
-                    
-                    # 单细胞
-                    sc = dist.get('single_cell', {})
-                    with rna_cols[1]:
-                        st.markdown("**🔬 单细胞**")
-                        if sc.get('specificity'):
-                            st.write(f"{sc['specificity']}")
-                            if sc.get('specific_ncpm'):
-                                st.caption(f"nCPM: {sc['specific_ncpm']}")
-                        else:
-                            st.write("N/A")
-                    
-                    # 肿瘤
-                    cancer = dist.get('cancer', {})
-                    with rna_cols[2]:
-                        st.markdown("**⚕️ 肿瘤**")
-                        if cancer.get('specificity'):
-                            st.write(f"{cancer['specificity']}")
-                            if cancer.get('specific_ptpm'):
-                                st.caption(f"pTPM: {cancer['specific_ptpm']}")
-                        else:
-                            st.write("N/A")
-                    
-                    # 血细胞
-                    blood = dist.get('blood', {})
-                    with rna_cols[3]:
-                        st.markdown("**🩸 血细胞**")
-                        if blood.get('specificity'):
-                            st.write(f"{blood['specificity']}")
-                            if blood.get('specific_ntpm'):
-                                st.caption(f"nTPM: {blood['specific_ntpm']}")
-                        else:
-                            st.write("N/A")
+                    for interp in interpretations:
+                        st.markdown(f"- {interp}")
+                else:
+                    st.info("*暂无RNA表达数据*")
         else:
             st.info("未获取到HPA基因信息（请确保输入有效基因名称）")
 
@@ -4789,29 +4799,110 @@ def render_results(result: Dict):
                             else:
                                 st.info(f"🤖 {note}")
 
-                        categories = {
-                            'culture_medium': ('培养基特殊要求', '#ffebee'),
-                            'coating_matrix': ('基质/包被要求', '#f3e5f5'),
-                            'environment': ('气体/环境敏感', '#e3f2fd'),
-                            'operation': ('操作复杂度', '#fff3e0'),
-                            'time_cost': ('时间/成本', '#e8f5e9'),
-                            'special_warnings': ('⚠️ 关键警告', '#ffcdd2'),
-                            'protocol_tips': ('💡 Protocol建议', '#e0f7fa')
-                        }
-
+                        # 精简后的展示逻辑
                         has_any = False
-                        for key, (title, bg_color) in categories.items():
-                            items = culture_diff.get(key, [])
-                            if items and isinstance(items, list) and len(items) > 0:
+                        
+                        # 1. 气体/环境敏感 - 只显示非5% CO2、非37°C时提示实际的培养条件，不然显示"37°C，5% CO2"
+                        env_items = culture_diff.get('environment', [])
+                        env_display = []
+                        # 检查是否有特殊环境要求
+                        has_special_env = False
+                        for item in env_items:
+                            # 排除常规条件
+                            if any(x in item for x in ['5% CO₂', '37℃', '37 °C', '37°C']):
+                                continue
+                            if '低氧' in item or '非5%' in item or '非37' in item or '震荡' in item or 'pH' in item:
+                                env_display.append(item)
+                                has_special_env = True
+                        
+                        with st.expander("🌡️ 气体/环境敏感", expanded=False):
+                            if has_special_env:
+                                for item in env_display:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e3f2fd; border-radius: 5px; border-left: 3px solid #2196F3;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
                                 has_any = True
-                                with st.expander(f"{title} ({len(items)}项)", expanded=(key=='special_warnings')):
-                                    for item in items:
-                                        st.markdown(f"""
-                                            <div style='margin: 5px 0; padding: 8px; background-color: {bg_color};
-                                            border-radius: 5px; border-left: 3px solid #666;'>
-                                                {html.escape(str(item))}
-                                            </div>
-                                        """, unsafe_allow_html=True)
+                            else:
+                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>37°C，5% CO₂</div>", unsafe_allow_html=True)
+                        
+                        # 2. 操作复杂度 - 只有非0.25%胰酶消化时提示
+                        op_items = culture_diff.get('operation', [])
+                        op_display = []
+                        for item in op_items:
+                            # 排除0.25%胰酶（常规条件）
+                            if '0.25%胰酶' in item or '0.25% 胰酶' in item:
+                                continue
+                            op_display.append(item)
+                        
+                        with st.expander("🔧 操作复杂度", expanded=False):
+                            if op_display:
+                                for item in op_display:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #fff3e0; border-radius: 5px; border-left: 3px solid #FF9800;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
+                                has_any = True
+                            else:
+                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>常规操作，无特殊要求</div>", unsafe_allow_html=True)
+                        
+                        # 3. 时间/成本 - 只有细胞增殖速度低（文献中特别提到增殖慢、倍增时间超过48小时）时提示
+                        tc_items = culture_diff.get('time_cost', [])
+                        tc_display = []
+                        for item in tc_items:
+                            # 只保留明确提到增殖慢、倍增时间>48小时的条目
+                            if any(x in item for x in ['>48小时', '超过48小时', '倍增时间', '生长极其缓慢', '增殖慢', '生长缓慢']):
+                                tc_display.append(item)
+                        
+                        with st.expander("⏱️ 时间/成本", expanded=False):
+                            if tc_display:
+                                for item in tc_display:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e8f5e9; border-radius: 5px; border-left: 3px solid #4CAF50;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
+                                has_any = True
+                            else:
+                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>常规生长速度，无特殊要求</div>", unsafe_allow_html=True)
+                        
+                        # 4. 关键警告 - 支原体属于常规管控项，不做提示。否则反馈"无特殊要求"
+                        warn_items = culture_diff.get('special_warnings', [])
+                        warn_display = []
+                        for item in warn_items:
+                            # 排除支原体相关（常规管控项）
+                            if '支原体' in item:
+                                continue
+                            warn_display.append(item)
+                        
+                        with st.expander("⚠️ 关键警告", expanded=True):  # 关键警告默认展开
+                            if warn_display:
+                                for item in warn_display:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #ffcdd2; border-radius: 5px; border-left: 3px solid #f44336;'><strong>{html.escape(str(item))}</strong></div>", unsafe_allow_html=True)
+                                has_any = True
+                            else:
+                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>无特殊要求</div>", unsafe_allow_html=True)
+                        
+                        # 5. Protocol建议 - 只有提示必须每天换液、每天传代时提示。否则反馈"无特殊要求"
+                        proto_items = culture_diff.get('protocol_tips', [])
+                        proto_display = []
+                        for item in proto_items:
+                            # 只保留必须每天换液/传代的提示
+                            if any(x in item for x in ['每天换液', '每天传代', '每日换液', '每日传代', '必须每天']):
+                                proto_display.append(item)
+                        
+                        with st.expander("💡 Protocol建议", expanded=False):
+                            if proto_display:
+                                for item in proto_display:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e0f7fa; border-radius: 5px; border-left: 3px solid #00BCD4;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
+                                has_any = True
+                            else:
+                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>无特殊要求</div>", unsafe_allow_html=True)
+                        
+                        # 培养基和基质要求保持不变（始终显示，因为这些是重要的信息）
+                        cm_items = culture_diff.get('culture_medium', [])
+                        if cm_items:
+                            has_any = True
+                            with st.expander("🧫 培养基特殊要求", expanded=False):
+                                for item in cm_items:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #ffebee; border-radius: 5px; border-left: 3px solid #E91E63;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
+                        
+                        coat_items = culture_diff.get('coating_matrix', [])
+                        if coat_items:
+                            has_any = True
+                            with st.expander("🔲 基质/包被要求", expanded=False):
+                                for item in coat_items:
+                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #f3e5f5; border-radius: 5px; border-left: 3px solid #9C27B0;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
 
                         if not has_any:
                             st.success("✓ 未检索到该细胞系的特殊培养难点，可能为常规培养细胞")
