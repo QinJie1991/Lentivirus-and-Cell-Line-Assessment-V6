@@ -4665,9 +4665,9 @@ def render_results(result: Dict):
                     antibody_display = "N/A"
                 table_data.append({"信息项": "抗体推荐", "内容": antibody_display})
                 
-                # 显示表格
+                # 显示表格 - 使用 st.table 避免依赖 tabulate
                 df_basic = pd.DataFrame(table_data)
-                st.markdown(df_basic.to_markdown(index=False), unsafe_allow_html=True)
+                st.table(df_basic)
                 
                 st.divider()
                 
