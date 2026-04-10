@@ -61,6 +61,15 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ==================== AI模型配置 ====================
+AVAILABLE_AI_MODELS = {
+    'qwen-turbo': '通义千问-Turbo (快速响应)',
+    'qwen-plus': '通义千问-Plus (推荐，更好的推理能力)',
+    'qwen-max': '通义千问-Max (最强性能)'
+}
+DEFAULT_AI_MODEL = 'qwen-plus'
+# ================================================
+
 # ==================== HPA细胞系自动补全服务（新增）====================
 class HPACellLineAutocompleteService:
     """HPA数据库细胞系名称自动补全服务 - 包含1206个细胞系的标准名称"""
@@ -481,37 +490,67 @@ class AIAnalysisClient:
         }
 
     def analyze_antiviral_evidence(self, gene_name: str, title: str, abstract: str) -> Dict:
+        """
+        分析文献中是否报道了基因的抗病毒功能。
+        严格基于提供的文献内容，禁止推测。
+        """
         if not self.api_key:
             return {'is_antiviral': False, 'confidence': 0, 'mechanism': '', 'reasoning': '未配置API'}
 
         try:
-            prompt = f"""请分析以下文献，判断其是否报道了基因"{gene_name}"具有抗病毒功能。
+            prompt = f"""请【严格基于以下文献内容】判断基因"{gene_name}"是否具有抗病毒功能，并进行语义分析和归纳总结。
+
+【重要警告】你绝对不能进行推测：
+1. 只能基于提供的文献标题和摘要判断
+2. 如果文献未明确提及抗病毒功能，必须返回false
+3. 不要基于基因名称或一般知识进行推断
 
 文献标题：{title}
 文献摘要：{abstract}
 
-请按以下JSON格式回答（只返回JSON，不要有其他文字）：
+请按以下JSON格式回答（只返回JSON）：
 {{
     "is_antiviral": true/false,
     "confidence": 0.0-1.0,
-    "mechanism": "具体的抗病毒机制，如：调控IFITM家族、影响脂质代谢、激活干扰素通路等",
-    "reasoning": "简要说明判断依据"
+    "mechanism": "文献明确描述的抗病毒机制，如无则留空",
+    "reasoning": "引用文献中的具体描述作为判断依据",
+    
+    "semantic_analysis": {{
+        "evidence_strength": "基于文献的语义证据强度评估（Strong/Moderate/Weak/None）",
+        "functional_context": "文献中描述的功能上下文",
+        "implied_roles": ["文献暗示的可能作用（但不编造）"],
+        "terminology_signals": "文献用语的信号分析"
+    }},
+    
+    "inductive_summary": {{
+        "core_claim": "文献的核心主张总结",
+        "supporting_evidence": "支持抗病毒功能的证据",
+        "limitations": "文献中提到的局限性或条件",
+        "research_context": "研究背景对结论的影响"
+    }}
 }}
 
-注意：
-1. is_antiviral：只要文献提到该基因能抑制病毒复制、增强抗病毒免疫、调控抗病毒基因表达等，即为true
-2. confidence：证据越明确、机制越清晰，置信度越高
-3. 即使不是经典的ISG基因，只要提到能影响病毒感染或复制，也算有抗病毒功能"""
+严格标准：
+1. is_antiviral=true：文献【明确】提到该基因能抑制病毒复制、增强抗病毒免疫等
+2. is_antiviral=false：文献未提及抗病毒功能，或仅提及其他功能
+3. confidence：0.0-1.0，基于证据明确程度
+4. mechanism：必须是文献中明确描述的，禁止推测
+5. reasoning：必须引用文献原文或准确概括文献内容
+6. 【语义分析】深度理解文献的表述方式和隐含信息
+7. 【归纳总结】提炼文献的核心发现和证据结构"""
 
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
-                        {'role': 'system', 'content': '你是一个专业的生物医学文献分析助手，擅长从文献中提取基因的抗病毒功能证据。'},
+                        {'role': 'system', 'content': '你是一个严谨的生物医学文献分析助手。你只基于提供的文献内容进行判断，绝不进行推测或引申。'},
                         {'role': 'user', 'content': prompt}
                     ]
                 },
@@ -543,13 +582,14 @@ class AIAnalysisClient:
                     'reasoning': analysis.get('reasoning', '')
                 }
             except json.JSONDecodeError:
+                # 降级处理：使用关键词匹配
                 is_antiviral = any(kw in (title + abstract).lower() for kw in
                     ['antiviral', 'virus', 'interferon', 'ifitm', 'innate immunity'])
                 return {
                     'is_antiviral': is_antiviral,
-                    'confidence': 0.5 if is_antiviral else 0,
-                    'mechanism': 'AI解析失败，使用关键词匹配',
-                    'reasoning': 'API返回格式异常，降级处理'
+                    'confidence': 0.3 if is_antiviral else 0,  # 降低置信度
+                    'mechanism': '解析失败，使用关键词匹配（仅供参考）',
+                    'reasoning': 'API返回格式异常，使用关键词匹配降级处理'
                 }
 
         except Exception as e:
@@ -571,7 +611,7 @@ class AIAnalysisClient:
                 return f"\n{label}文献：无相关文献\n"
             text = f"\n{label}文献：\n"
             for i, p in enumerate(papers[:5], 1):
-                text += f"{i}. {p.get('title', '')} - {p.get('abstract', '')[:300]}...\n"
+                text += f"{i}. {p.get('title', '')} - {p.get('abstract', '')[:300]}... PMID:{p.get('pmid', 'N/A')}\n"
             return text
 
         literature_text = ""
@@ -580,94 +620,145 @@ class AIAnalysisClient:
         literature_text += format_papers(papers_kd, "敲低/敲除")
         literature_text += format_papers(papers_ko, "敲除")
 
-        prompt = f"""作为分子生物学和遗传学专家，请基于以下文献信息，全面总结基因"{gene_name}"（{gene_description}）的功能及实验模型数据。
+        # 【严格模式】如果没有文献，返回空结果
+        total_papers = len(papers_general) + len(papers_oe) + len(papers_kd) + len(papers_ko)
+        if total_papers == 0:
+            return {
+                'protein_function': {
+                    'category': '未检索到文献',
+                    'domains': '未检索到文献',
+                    'pathways': '未检索到文献',
+                    'cellular_location': '未检索到文献',
+                    'tissue_expression': '未检索到文献'
+                },
+                'overexpression': {'cell_models': [], 'animal_models': [], 'summary': '无相关文献'},
+                'knockdown': {'cell_models': [], 'summary': '无相关文献'},
+                'knockout': {'cell_models': [], 'animal_models': [], 'summary': '无相关文献'},
+                'disease_relevance': {
+                    'cancer': '未检索到文献',
+                    'other_diseases': '未检索到文献',
+                    'therapeutic_potential': '未检索到文献'
+                },
+                'key_references': [],
+                'experimental_notes': '未检索到该基因的相关文献，无法提供功能总结。建议查阅NCBI Gene数据库或PubMed获取最新信息。',
+                'data_source_note': '未找到相关文献，AI未进行推测'
+            }
 
-【重要】你只能基于以下提供的真实文献进行总结，严禁编造任何文献、数据或PMID：
+        prompt = f"""作为分子生物学和遗传学专家，请【严格基于以下提供的文献】总结基因"{gene_name}"的功能及实验模型数据。
+
+【重要警告】你绝对不能进行推测或编造：
+1. 只能基于提供的文献回答问题
+2. 如果文献未提及某项信息，该字段必须标注"文献未提供"
+3. 禁止基于基因名称或一般知识进行推断
+4. 每个具体数据必须标注文献来源（PMID）
+
+提供的文献：
 {literature_text}
 
 请按以下JSON格式提供结构化总结（只返回JSON）：
 {{
     "protein_function": {{
-        "category": "蛋白功能类别（如：锌指转录因子、丝氨酸蛋白酶、GPCR受体等）",
-        "domains": "主要结构域及其功能",
-        "pathways": "参与的关键信号通路",
-        "cellular_location": "亚细胞定位",
-        "tissue_expression": "主要表达组织"
+        "category": "文献明确描述的功能类别 + [PMID:XXXX]",
+        "domains": "文献明确描述的结构域 + [PMID:XXXX]",
+        "pathways": "文献明确描述的通路 + [PMID:XXXX]",
+        "cellular_location": "文献明确描述的亚细胞定位 + [PMID:XXXX]",
+        "tissue_expression": "文献明确描述的组织表达 + [PMID:XXXX]"
     }},
     "overexpression": {{
         "cell_models": [
             {{
-                "cell_line": "细胞系名称",
-                "phenotype": "观察到的表型（如：促进增殖、诱导凋亡、EMT转化等）",
-                "mechanism": "分子机制",
-                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
+                "cell_line": "文献明确报道的细胞系",
+                "phenotype": "文献明确报道的表型",
+                "mechanism": "文献明确描述的机制",
+                "reference": "PMID:XXXX（文献标题）"
             }}
         ],
         "animal_models": [
             {{
-                "model": "动物模型（如：转基因小鼠、尾静脉注射等）",
-                "phenotype": "表型",
-                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
+                "model": "文献明确报道的动物模型",
+                "phenotype": "文献明确报道的表型",
+                "reference": "PMID:XXXX（文献标题）"
             }}
         ],
-        "summary": "过表达效应的总体特征"
+        "summary": "基于文献的过表达效应总结"
     }},
     "knockdown": {{
         "cell_models": [
             {{
-                "cell_line": "细胞系",
-                "method": "敲低方法（siRNA/shRNA）",
-                "phenotype": "表型",
-                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
+                "cell_line": "文献明确报道的细胞系",
+                "method": "文献明确报道的敲低方法",
+                "phenotype": "文献明确报道的表型",
+                "reference": "PMID:XXXX（文献标题）"
             }}
         ],
-        "summary": "敲低效应的总体特征"
+        "summary": "基于文献的敲低效应总结"
     }},
     "knockout": {{
         "cell_models": [
             {{
-                "cell_line": "细胞系",
-                "method": "敲除方法（CRISPR/TALEN）",
-                "phenotype": "表型",
-                "viability": "是否影响细胞活力",
-                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
+                "cell_line": "文献明确报道的细胞系",
+                "method": "文献明确报道的敲除方法",
+                "phenotype": "文献明确报道的表型",
+                "viability": "文献明确报道的细胞活力影响",
+                "reference": "PMID:XXXX（文献标题）"
             }}
         ],
         "animal_models": [
             {{
-                "model": "动物模型",
-                "phenotype": "表型（如：胚胎致死、发育缺陷、代谢异常等）",
-                "lethality": "致死性",
-                "reference": "文献来源，格式：第一作者 et al., 年份, 期刊, PMID:12345678"
+                "model": "文献明确报道的动物模型",
+                "phenotype": "文献明确报道的表型",
+                "lethality": "文献明确报道的致死性",
+                "reference": "PMID:XXXX（文献标题）"
             }}
         ],
-        "summary": "敲除效应的总体特征"
+        "summary": "基于文献的敲除效应总结"
     }},
     "disease_relevance": {{
-        "cancer": "在肿瘤中的作用（促癌/抑癌）及相关癌症类型",
-        "other_diseases": "其他疾病相关性",
-        "therapeutic_potential": "治疗潜力评估"
+        "cancer": "文献明确描述的肿瘤作用 + [PMID:XXXX]",
+        "other_diseases": "文献明确描述的其他疾病 + [PMID:XXXX]",
+        "therapeutic_potential": "文献明确描述的治疗潜力 + [PMID:XXXX]"
     }},
     "key_references": [
-        "格式：仅列出上述提供的文献中最重要的3-5篇，格式：作者 et al., 年份, 期刊, PMID"
+        "PMID:XXXX（文献标题）"
     ],
-    "experimental_notes": "实验设计建议（如：敲除是否致死、过表达是否诱导凋亡等注意事项）"
+    "experimental_notes": "基于文献的实验设计建议",
+    "data_source_note": "基于X篇文献分析，所有信息均有文献支持",
+    
+    "semantic_analysis": {{
+        "gene_character": "基于文献的基因特性语义描述（如：促癌基因/抑癌基因/必需基因等）",
+        "functional_complexity": "功能复杂度的语义评估",
+        "experimental_challenges": ["文献中暗示的实验挑战"],
+        "safety_considerations": "基于文献的安全考虑"
+    }},
+    
+    "inductive_summary": {{
+        "functional_consensus": "多篇文献对该基因功能的共识",
+        "phenotypic_patterns": "表型模式总结（如：过表达总是促进增殖）",
+        "context_dependent_effects": "上下文依赖性效应（如：细胞类型特异性）",
+        "knowledge_conflicts": "文献间的矛盾或不一致之处",
+        "research_gaps": "研究空白和未来方向"
+    }}
 }}
 
 严格要求：
-1. 【禁止编造】你只能基于上面提供的文献信息进行总结，没有的数据必须标注"未见报道"或"文献未提供"
-2. 【引用限制】所有reference字段只能引用上面提供的真实文献，必须包含准确的PMID
-3. 【无文献则无引用】如果某条信息不是来自提供的文献，不要编造引用，直接标注"未见报道"即可
-4. 区分细胞水平和动物水平的数据
-5. 重点关注与慢病毒包装相关的因素（如：是否影响细胞活力、是否调控病毒相关通路）"""
+1. 【禁止推测】文献未明确报道的信息必须标注"文献未提供"
+2. 【必须标注来源】每个具体描述后必须标注[PMID:XXXX]
+3. 【禁止常识推断】即使是常见基因（如p53、GAPDH），没有文献支持不得输出
+4. 如果某类文献缺失（如无敲除文献），该部分必须返回空数组或标注"无相关文献"
+5. key_references只能列出上述提供的真实文献，必须包含准确PMID
+6. 【语义分析】深度理解文献中的功能描述和隐含信息
+7. 【归纳总结】整合多篇文献的发现，找出功能模式、共识和矛盾"""
 
         try:
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是分子生物学专家，精通基因功能注释和表型分析。你只能基于用户提供的文献进行总结，绝对禁止编造任何文献、PMID、作者或期刊信息。reference字段必须严格使用格式："第一作者 et al., 年份, 期刊缩写, PMID:数字"。如果信息不确定，明确标注"未见报道"。'},
@@ -707,103 +798,447 @@ class AIAnalysisClient:
 
     def design_rnai_sequences(self, gene_name: str, gene_id: str = "",
                              gene_description: str = "") -> Dict:
-        if not self.api_key:
-            return {'error': '未配置AI API，无法设计序列', 'sequences': []}
-
+        """从PMC全文文献和专利数据库中检索siRNA/shRNA序列（不依赖AI生成）"""
         try:
-            prompt = f"""作为RNAi序列设计专家，请为基因"{gene_name}"（Gene ID: {gene_id}, 描述: {gene_description}）设计siRNA/shRNA序列。
-
-请基于公认的RNAi设计原则和公开数据库知识，提供：
-1. 3条高质量的siRNA靶序列（19-21nt，不包含悬垂端）
-2. 每条序列的设计依据（靶向哪个外显子、GC含量等）
-3. 支持这些设计的参考文献（【严格要求】必须是真实存在的经典文献，如Elbashir 2001 Nature, Reynolds 2004 Nature Biotechnology等公认的RNAi设计指南）
-
-【重要】你必须遵守以下规范：
-- 参考文献必须是真实存在的、可验证的文献
-- 优先引用RNAi领域的经典方法论文（如：Elbashir et al. 2001, Reynolds et al. 2004, Ui-Tei et al. 2004等）
-- 不要编造任何作者、年份或期刊信息
-- 如果不确定某篇文献是否存在，只引用你最确定的真实文献
-
-请按以下JSON格式回答（只返回JSON）：
-{{
-    "sequences": [
-        {{
-            "target_seq": "AAGUCGAGUAGCGAAGCUUTT",
-            "target_region": "CDS区域，第123-141位",
-            "design_rationale": "GC含量45%，避开UTR和SNP区域，无连续G/C",
-            "efficiency_score": "高（预期敲低效率>80%）",
-            "references": [
-                {{
-                    "type": "文献",
-                    "title": "Specificity of RNA interference in mammalian cells",
-                    "authors": "Elbashir et al.",
-                    "year": "2001",
-                    "source": "Nature",
-                    "pmid_or_patent": "PMID:11252768",
-                    "url": "https://pubmed.ncbi.nlm.nih.gov/11252768/"
-                }}
+            import re
+            
+            # 设置NCBI API参数
+            email, api_key, error = APIConfig.get_ncbi_credentials()
+            if error:
+                return {'error': 'NCBI API未配置', 'sequences': [], 'source': 'literature'}
+            
+            base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+            
+            def ncbi_request(endpoint, params):
+                """发送NCBI API请求"""
+                params['tool'] = 'LentivirusAssessment'
+                params['email'] = email
+                if api_key:
+                    params['api_key'] = api_key
+                try:
+                    ncbi_limiter.wait()
+                    response = requests.get(f"{base_url}/{endpoint}", params=params, timeout=30)
+                    response.raise_for_status()
+                    if params.get('retmode') == 'json':
+                        return response.json()
+                    return response.text
+                except Exception as e:
+                    logger.error(f"NCBI请求失败: {e}")
+                    return None
+            
+            # 搜索PMC（PubMed Central）全文数据库
+            search_terms = [
+                f'({gene_name}[Title/Abstract]) AND (siRNA[Title/Abstract] OR shRNA[Title/Abstract])',
+                f'({gene_name}[Title/Abstract]) AND ("small interfering RNA"[Title/Abstract] OR "short hairpin RNA"[Title/Abstract])',
+                f'({gene_name}[Title/Abstract]) AND ("knockdown"[Title/Abstract] OR "silencing"[Title/Abstract]) AND RNAi',
+                f'({gene_name}[Title/Abstract]) AND ("RNA interference"[Title/Abstract] OR "gene silencing"[Title/Abstract])'
             ]
-        }}
-    ],
-    "shrna_vector_design": {{
-        "loop_sequence": "TTCAAGAGA",
-        "promoter": "U6或H1",
-        "cloning_sites": "BamHI/EcoRI",
-        "notes": "建议使用pLKO.1或pSUPER载体系统"
-    }},
-    "notes": "建议使用BLAST验证特异性，避免脱靶效应；推荐设计阴性对照（scrambled）",
-    "validation_method": "Western blot或qPCR检测mRNA水平，建议检测时间点在转染后48-72小时"
-}}
-
-严格要求：
-1. 序列必须是真实的、经过验证的设计原则（Ui-Tei规则、Reynolds标准等）
-2. 参考文献必须是你确定真实存在的经典文献（2000-2024年间）
-3. 如果不确定某条文献是否存在，宁可不引用也不要编造
-4. 提供具体的载体构建建议"""
-
-            headers = {
-                'Authorization': f'Bearer {self.api_key}',
-                'Content-Type': 'application/json'
-            }
-            payload = {
-                'model': 'qwen-turbo',
-                'input': {
-                    'messages': [
-                        {'role': 'system', 'content': '你是RNA干扰(RNAi)技术专家，精通siRNA/shRNA序列设计和慢病毒载体构建，熟悉相关领域的经典文献和专利。'},
-                        {'role': 'user', 'content': prompt}
-                    ]
+            
+            all_sequences = []
+            seen_sequences = set()
+            supplementary_only = []
+            
+            for term in search_terms:
+                try:
+                    # 搜索PubMed
+                    search_result = ncbi_request('esearch.fcgi', {
+                        'db': 'pubmed',
+                        'term': term,
+                        'retmax': 15,
+                        'sort': 'relevance',
+                        'retmode': 'json'
+                    })
+                    if not search_result:
+                        continue
+                    
+                    pmid_list = search_result.get('esearchresult', {}).get('idlist', [])
+                    if not pmid_list:
+                        continue
+                    
+                    # 获取PMC ID
+                    link_result = ncbi_request('elink.fcgi', {
+                        'dbfrom': 'pubmed',
+                        'db': 'pmc',
+                        'id': pmid_list,
+                        'retmode': 'json'
+                    })
+                    if not link_result:
+                        continue
+                    
+                    # 解析PMC ID
+                    pmc_ids = []
+                    pmid_to_pmc = {}
+                    for linkset in link_result.get('linksets', []):
+                        pmid = linkset.get('ids', [''])[0]
+                        for link in linkset.get('linksetdbs', []):
+                            if link.get('linkname') == 'pubmed_pmc':
+                                for pmc_link in link.get('links', []):
+                                    pmc_id = str(pmc_link)
+                                    if pmc_id:
+                                        pmc_ids.append(pmc_id)
+                                        pmid_to_pmc[pmid] = pmc_id
+                    
+                    if not pmc_ids:
+                        continue
+                    
+                    # 获取文献基本信息
+                    medline_text = ncbi_request('efetch.fcgi', {
+                        'db': 'pubmed',
+                        'id': pmid_list,
+                        'rettype': 'medline',
+                        'retmode': 'text'
+                    })
+                    
+                    # 解析PubMed信息
+                    pmid_info = {}
+                    if medline_text:
+                        for article in medline_text.split('\n\n'):
+                            pmid_match = re.search(r'PMID- (\d+)', article)
+                            if pmid_match:
+                                pmid = pmid_match.group(1)
+                                title_match = re.search(r'TI  - (.+?)(?:\n[A-Z]{2}  -|\Z)', article, re.DOTALL)
+                                year_match = re.search(r'DP  - (\d{4})', article)
+                                pmid_info[pmid] = {
+                                    'title': title_match.group(1).replace('\n      ', ' ') if title_match else '',
+                                    'year': year_match.group(1) if year_match else ''
+                                }
+                    
+                    # 获取PMC全文
+                    for pmid, pmc_id in pmid_to_pmc.items():
+                        try:
+                            pmc_xml = ncbi_request('efetch.fcgi', {
+                                'db': 'pmc',
+                                'id': pmc_id,
+                                'rettype': 'xml',
+                                'retmode': 'xml'
+                            })
+                            if not pmc_xml:
+                                continue
+                            
+                            info = pmid_info.get(pmid, {'title': '', 'year': ''})
+                            
+                            # 查找Methods部分（使用正则）
+                            methods_patterns = [
+                                r'<sec[^>]*sec-type=["\']methods["\'][^>]*>(.*?)</sec>',
+                                r'<title>\s*Materials?\s+and\s+Methods\s*</title>(.*?)(?:<sec>|<title>|<back>|</body>)',
+                                r'<title>\s*Methods\s*</title>(.*?)(?:<sec>|<title>|<back>|</body>)',
+                                r'<title>\s*Experimental\s+Procedures?\s*</title>(.*?)(?:<sec>|<title>|<back>|</body>)',
+                            ]
+                            
+                            methods_text = ''
+                            for pattern in methods_patterns:
+                                matches = re.findall(pattern, pmc_xml, re.IGNORECASE | re.DOTALL)
+                                if matches:
+                                    methods_text = ' '.join(matches)
+                                    break
+                            
+                            # 清理文本
+                            methods_text = re.sub(r'<[^>]+>', ' ', methods_text)
+                            methods_text = re.sub(r'\s+', ' ', methods_text)
+                            
+                            if not methods_text.strip():
+                                continue
+                            
+                            # 检查是否在补充材料中
+                            supplementary_patterns = [
+                                r'(?:see|available|provided|listed|described)\s+(?:in|on)\s+(?:the\s+)?(?:Supplementary|supplemental|supporting|additional)',
+                                r'Supplementary\s+(?:Table|Data|File|Material|Information)',
+                                r'supplementary\s+data',
+                                r'Table\s+S\d+',
+                            ]
+                            
+                            has_supplementary = any(
+                                re.search(p, methods_text, re.IGNORECASE) for p in supplementary_patterns
+                            )
+                            
+                            # 搜索siRNA/shRNA序列 - 多种模式匹配
+                            sequence_patterns = [
+                                # siRNA序列模式 (19-25nt)
+                                r'siRNA[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                r'siRNA[s]?\s+target[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                r'siRNA[s]?\s+sequence[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                # shRNA序列模式
+                                r'shRNA[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                r'shRNA[s]?\s+target[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                r'hairpin\s+sequence[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                # 正义链/反义链模式
+                                r'sense\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                r'antisense\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                # 通用靶序列模式
+                                r'target\s+sequence[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                                # 带位置信息的模式
+                                rf'{gene_name}\s+[A-Za-z]*\s*[:=]?\s*["\']?([ACGU]{{19,25}})["\']?',
+                                # 表格中的序列模式
+                                r'[\(\[]?\d+[\)\[]?\s*[:=)\]]\s*["\']?([ACGU]{19,25})["\']?',
+                            ]
+                            
+                            found_in_methods = False
+                            for pattern in sequence_patterns:
+                                matches = re.findall(pattern, methods_text, re.IGNORECASE)
+                                for seq in matches:
+                                    seq_upper = seq.upper()
+                                    # 过滤条件
+                                    if seq_upper in seen_sequences:
+                                        continue
+                                    if len(set(seq_upper)) < 4:  # 序列多样性检查
+                                        continue
+                                    # 过滤引物序列、接头序列等
+                                    if seq_upper.startswith('TAATACGACTCACTATA') or 'AAAAAAAA' in seq_upper or 'TTTTTTTT' in seq_upper:
+                                        continue
+                                    # 确保是RNA序列（含U）或DNA序列（含T但转为RNA）
+                                    if 'U' in seq_upper:
+                                        rna_seq = seq_upper
+                                    elif 'T' in seq_upper:
+                                        rna_seq = seq_upper.replace('T', 'U')
+                                    else:
+                                        rna_seq = seq_upper
+                                    
+                                    seen_sequences.add(seq_upper)
+                                    found_in_methods = True
+                                    
+                                    all_sequences.append({
+                                        'target_seq': rna_seq,
+                                        'target_region': '文献Methods部分报道',
+                                        'design_rationale': '文献报道序列',
+                                        'efficiency_score': '文献报道',
+                                        'type': 'siRNA' if 'siRNA' in methods_text.upper() else 'shRNA',
+                                        'source': 'literature',
+                                        'location': 'Materials and Methods',
+                                        'reference': {
+                                            'type': '文献',
+                                            'title': info['title'][:150] + '...' if len(info['title']) > 150 else info['title'],
+                                            'year': info['year'],
+                                            'pmid_or_patent': f'PMID:{pmid}',
+                                            'url': f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/',
+                                            'pmc_url': f'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmc_id}/'
+                                        }
+                                    })
+                            
+                            if not found_in_methods and has_supplementary and ('siRNA' in methods_text.upper() or 'shRNA' in methods_text.upper()):
+                                supplementary_only.append({
+                                    'title': info['title'][:150] + '...' if len(info['title']) > 150 else info['title'],
+                                    'year': info['year'],
+                                    'pmid': pmid,
+                                    'url': f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/',
+                                    'pmc_url': f'https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmc_id}/',
+                                    'note': 'siRNA/shRNA序列在补充材料中'
+                                })
+                            
+                        except Exception as e:
+                            continue
+                                
+                except Exception as e:
+                    continue
+            
+            # ===== 搜索专利数据库 =====
+            patent_search_result = self._search_patents_for_rnai(gene_name, seen_sequences)
+            patent_sequences = patent_search_result.get('sequences', [])
+            patent_metadata = patent_search_result.get('metadata', [])
+            all_sequences.extend(patent_sequences)
+            
+            # 构建返回结果
+            result = {
+                'sequences': all_sequences[:5],
+                'supplementary_only': supplementary_only[:3],
+                'patent_metadata': patent_metadata[:5],
+                'source': 'literature_and_patents',
+                'search_location': 'PMC全文Materials and Methods + 专利权利要求书/详细说明',
+                'shrna_vector_design': {
+                    'loop_sequence': 'TTCAAGAGA（文献常用）',
+                    'promoter': 'U6或H1（文献常用）',
+                    'cloning_sites': 'BamHI/EcoRI 或 BbsI/BsmBI（文献常用）',
+                    'notes': '建议使用pLKO.1或pSUPER载体系统（经典文献方案）'
                 },
-                'parameters': {
-                    'result_format': 'message',
-                    'max_tokens': 2000,
-                    'temperature': 0.2
-                }
+                'validation_method': 'Western blot或qPCR检测mRNA水平；建议通过原文确认序列准确性'
             }
-
-            response = requests.post(
-                self.base_url,
-                headers=headers,
-                json=payload,
-                timeout=60
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            content = result.get('output', {}).get('choices', [{}])[0].get('message', {}).get('content', '')
-
-            try:
-                content_clean = content.replace('```json', '').replace('```', '').strip()
-                return json.loads(content_clean)
-            except json.JSONDecodeError:
-                return {
-                    'error': 'AI返回格式异常',
-                    'sequences': [],
-                    'raw_response': content[:500],
-                    'note': '解析失败，但API已调用'
-                }
-
+            
+            # 统计来源
+            literature_count = len([s for s in all_sequences if s.get('source') == 'literature'])
+            patent_count = len([s for s in all_sequences if s.get('source') == 'patent'])
+            
+            if all_sequences:
+                result['notes'] = f'从{literature_count}篇文献和{patent_count}件专利中找到siRNA/shRNA序列。建议通过原文确认准确性。'
+            elif patent_metadata:
+                result['notes'] = f'发现{len(patent_metadata)}件相关专利可能包含siRNA/shRNA序列（需查阅权利要求书）。'
+            elif supplementary_only:
+                result['notes'] = f'发现{len(supplementary_only)}篇文献在Methods中提及siRNA/shRNA，但序列在补充材料中。'
+            else:
+                result['notes'] = '未在文献和专利全文中找到siRNA/shRNA序列。建议：1) 查阅文献补充材料；2) 使用在线工具设计。'
+                result['alternative_tools'] = [
+                    {'name': 'siDirect', 'url': 'https://sidirect2.rnai.jp/'},
+                    {'name': 'BLOCK-iT RNAi Designer', 'url': 'https://www.thermofisher.com/cn/zh/home/life-science/rnai/rnai-design-tools.html'},
+                    {'name': 'DSIR', 'url': 'http://biodev.extra.cea.fr/DSIR/DSIR.html'}
+                ]
+            
+            return result
+                
         except Exception as e:
-            return {'error': str(e), 'sequences': [], 'note': f'设计失败: {str(e)}'}
+            import traceback
+            return {'error': str(e), 'sequences': [], 'source': 'literature', 'note': f'检索失败: {str(e)}', 'traceback': traceback.format_exc()[:500]}
+
+    def _search_patents_for_rnai(self, gene_name: str, seen_sequences: set) -> Dict:
+        """从专利数据库中搜索siRNA/shRNA序列"""
+        patent_sequences = []
+        patent_metadata = []
+        
+        try:
+            try:
+                from Bio import Entrez
+            except ImportError:
+                return {'sequences': [], 'metadata': []}
+            
+            import re
+            
+            patent_terms = [
+                f'({gene_name}[Title]) AND (siRNA OR shRNA OR "RNA interference")',
+                f'({gene_name}[Title]) AND ("small interfering RNA" OR "short hairpin RNA")',
+                f'({gene_name}[Abstract]) AND (siRNA OR shRNA OR "gene silencing")',
+            ]
+            
+            for term in patent_terms:
+                try:
+                    handle = Entrez.esearch(db='pat', term=term, retmax=10, sort='relevance')
+                    record = Entrez.read(handle)
+                    handle.close()
+                    
+                    patent_ids = record.get('IdList', [])
+                    if not patent_ids:
+                        continue
+                    
+                    # 获取专利详情
+                    handle = Entrez.efetch(db='pat', id=patent_ids, rettype='xml', retmode='xml')
+                    patent_xml = handle.read()
+                    handle.close()
+                    
+                    if isinstance(patent_xml, bytes):
+                        patent_xml = patent_xml.decode('utf-8')
+                    
+                    # 解析专利XML
+                    patent_items = re.findall(r'<Patent[^>]*>(.*?)</Patent>', patent_xml, re.DOTALL)
+                    
+                    for item in patent_items:
+                        # 提取专利标题
+                        title_match = re.search(r'<PatentTitle[^>]*>(.*?)</PatentTitle>', item, re.DOTALL)
+                        title = re.sub(r'<[^>]+>', '', title_match.group(1)) if title_match else ''
+                        
+                        # 提取专利号
+                        patent_id_match = re.search(r'<PatentId[^>]*>(.*?)</PatentId>', item, re.DOTALL)
+                        patent_id = patent_id_match.group(1) if patent_id_match else ''
+                        
+                        # 提取申请日期
+                        date_match = re.search(r'<Date>(\d{4})', item)
+                        year = date_match.group(1) if date_match else ''
+                        
+                        # 尝试提取权利要求书和详细说明
+                        claims_match = re.search(r'<Claims[^>]*>(.*?)</Claims>', item, re.DOTALL)
+                        description_match = re.search(r'<Description[^>]*>(.*?)</Description>', item, re.DOTALL)
+                        abstract_match = re.search(r'<Abstract[^>]*>(.*?)</Abstract>', item, re.DOTALL)
+                        
+                        # 合并所有文本
+                        full_text = ''
+                        if claims_match:
+                            claims_text = re.sub(r'<[^>]+>', ' ', claims_match.group(1))
+                            full_text += claims_text + ' '
+                        if description_match:
+                            desc_text = re.sub(r'<[^>]+>', ' ', description_match.group(1))
+                            full_text += desc_text + ' '
+                        if abstract_match:
+                            abs_text = re.sub(r'<[^>]+>', ' ', abstract_match.group(1))
+                            full_text += abs_text + ' '
+                        
+                        # 如果没有找到详细文本，只记录元数据
+                        if not full_text.strip():
+                            check_text = (title + ' ' + (abstract_match.group(0) if abstract_match else '')).upper()
+                            if any(kw in check_text for kw in ['SIRNA', 'SHRNA', 'RNAI', 'SILENCING', gene_name.upper()]):
+                                patent_metadata.append({
+                                    'type': 'patent_fulltext_needed',
+                                    'title': title[:200] + '...' if len(title) > 200 else title,
+                                    'year': year,
+                                    'patent_id': patent_id,
+                                    'note': '专利中可能包含siRNA/shRNA序列，需查阅全文（权利要求书/详细说明）',
+                                    'url': f'https://patents.google.com/?q={patent_id.replace(" ", "+")}'
+                                })
+                            continue
+                        
+                        # 清理文本
+                        full_text = re.sub(r'\s+', ' ', full_text)
+                        
+                        # 搜索siRNA/shRNA序列
+                        sequence_patterns = [
+                            r'siRNA[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                            r'shRNA[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                            r'target\s+sequence[s]?\s*[:=]\s*["\']?([ACGU]{19,25})["\']?',
+                            r'["\']([ACGU]{19,25})["\'][^ACGU]*(?:siRNA|shRNA)',
+                            r'(?:siRNA|shRNA)[^ACGU]*["\']([ACGU]{19,25})["\']',
+                            r'claim\s+\d+[:\s]+[\s\S]{0,100}([ACGU]{19,25})',
+                            r'sequence\s*(?:ID)?\s*(?:NO)?[:\s\.]*\d*[\s:]*([ACGU]{19,25})',
+                        ]
+                        
+                        found_in_patent = False
+                        for pattern in sequence_patterns:
+                            matches = re.findall(pattern, full_text, re.IGNORECASE)
+                            for seq in matches:
+                                seq_upper = seq.upper()
+                                
+                                if seq_upper in seen_sequences:
+                                    continue
+                                if len(set(seq_upper)) < 4:
+                                    continue
+                                if seq_upper.startswith('TAATACGACTCACTATA'):
+                                    continue
+                                if 'AAAAAAAA' in seq_upper or 'TTTTTTTT' in seq_upper:
+                                    continue
+                                
+                                # 确保是RNA序列
+                                if 'U' in seq_upper:
+                                    rna_seq = seq_upper
+                                elif 'T' in seq_upper:
+                                    rna_seq = seq_upper.replace('T', 'U')
+                                else:
+                                    rna_seq = seq_upper
+                                    
+                                seen_sequences.add(seq_upper)
+                                found_in_patent = True
+                                
+                                patent_sequences.append({
+                                    'target_seq': rna_seq,
+                                    'target_region': '专利权利要求书/详细说明中报道',
+                                    'design_rationale': '专利报道序列',
+                                    'efficiency_score': '专利报道',
+                                    'type': 'siRNA/shRNA',
+                                    'source': 'patent',
+                                    'location': '专利全文',
+                                    'reference': {
+                                        'type': '专利',
+                                        'title': title[:200] + '...' if len(title) > 200 else title,
+                                        'year': year,
+                                        'pmid_or_patent': patent_id,
+                                        'url': f'https://patents.google.com/?q={patent_id.replace(" ", "+")}'
+                                    }
+                                })
+                        
+                        # 如果文本中有siRNA/shRNA关键词但没找到序列，记录元数据
+                        if not found_in_patent and ('SIRNA' in full_text.upper() or 'SHRNA' in full_text.upper()):
+                            patent_metadata.append({
+                                'type': 'patent_fulltext_needed',
+                                'title': title[:200] + '...' if len(title) > 200 else title,
+                                'year': year,
+                                'patent_id': patent_id,
+                                'note': '专利涉及siRNA/shRNA，但需查阅完整权利要求书获取序列',
+                                'url': f'https://patents.google.com/?q={patent_id.replace(" ", "+")}'
+                            })
+                                
+                except Exception as e:
+                    continue
+                    
+        except Exception as e:
+            pass
+        
+        # 合并结果：优先返回找到的序列，如果没有则返回元数据
+        if patent_sequences:
+            return {'sequences': patent_sequences, 'metadata': []}
+        else:
+            return {'sequences': [], 'metadata': patent_metadata[:5]}
 
     def design_crispr_sequences(self, gene_name: str, gene_id: str = "",
                                gene_description: str = "") -> Dict:
@@ -1239,58 +1674,93 @@ class AIAnalysisClient:
         for category, items in self.CELL_CULTURE_DIFFICULTY_CHECKLIST.items():
             checklist_text += f"\n{category}:\n" + "\n".join([f"- {item}" for item in items])
 
-        prompt = f"""作为细胞培养专家，请分析细胞系"{cell_line}"（已标准化命名）的培养难点。
+        # 【严格模式】如果没有文献，返回空结果
+        if not literature_text:
+            return {
+                'culture_medium': [],
+                'coating_matrix': [],
+                'environment': [],
+                'operation': [],
+                'time_cost': [],
+                'special_warnings': ['未检索到该细胞系的培养文献，无法提供可靠信息'],
+                'protocol_tips': ['建议查阅ATCC官方资料或相关protocol文献'],
+                'verified_by': [],
+                'data_source_note': '未找到相关文献，AI未进行推测'
+            }
 
-注：该细胞系名称已进行标准化处理（如NCI-H226、HK-2等）。
+        prompt = f"""作为细胞培养专家，请【严格基于以下提供的文献】分析细胞系"{cell_line}"的培养难点，并进行语义分析和归纳总结。
 
-{f"基于以下文献：{literature_text}" if literature_text else "（未检索到该细胞系的特定文献，请基于该细胞系的一般特点和常识进行分析）"}
+【重要警告】你绝对不能进行推测或编造：
+1. 如果文献中未提及某类信息，该字段必须返回空数组 []
+2. 每个描述必须标注文献来源（PMID）
+3. 禁止基于"常识"或"一般特点"进行推断
 
-参考以下检查清单类别：
-{checklist_text}
+提供的文献：
+{literature_text}
 
-请按以下JSON格式返回该细胞的所有已知培养难点（只返回JSON）：
+请按以下JSON格式返回（只返回JSON）：
 {{
     "culture_medium": [
-        "具体难点描述（如：必须使用无血清mTeSR培养基，价格昂贵）"
+        "文献明确报道的难点 + [PMID:XXXX]"
     ],
     "coating_matrix": [
-        "具体难点描述（如：必须预包被Matrigel，4°C过夜，操作繁琐）"
+        "文献明确报道的难点 + [PMID:XXXX]"
     ],
     "environment": [
-        "具体难点描述（如：需要5%低氧培养箱，普通CO₂培养箱不适用）"
+        "文献明确报道的难点 + [PMID:XXXX]"
     ],
     "operation": [
-        "具体难点描述（如：对胰酶极度敏感，消化超过3分钟即死亡）"
+        "文献明确报道的难点 + [PMID:XXXX]"
     ],
     "time_cost": [
-        "具体难点描述（如：倍增时间72小时，实验周期漫长）"
+        "文献明确报道的难点 + [PMID:XXXX]"
     ],
     "special_warnings": [
-        "关键警告（如：该细胞极易支原体污染，且污染后形态无明显变化）"
+        "文献明确报道的警告 + [PMID:XXXX]"
     ],
     "protocol_tips": [
-        "实用建议（如：建议半量换液，传代比例1:2，周末不休息）"
+        "文献明确报道的建议 + [PMID:XXXX]"
     ],
     "verified_by": [
-        "支持文献（格式：作者 et al., 年份, 期刊, PMID），如为常识则标注'基于细胞系一般特点'"
+        "PMID:XXXX（文献标题）"
     ],
-    "data_source_note": "说明数据是基于文献还是基于AI对该细胞系的常识推理"
+    "data_source_note": "基于X篇文献分析，所有信息均有文献支持",
+    
+    "semantic_analysis": {{
+        "difficulty_assessment": "基于文献内容的培养难度语义评估（Simple/Moderate/Complex/Highly_Demanding）",
+        "key_constraints": ["文献中隐含的关键限制因素"],
+        "critical_success_factors": ["文献强调的成功培养关键要素"],
+        "risk_indicators": ["文献中提到的风险信号或预警信号"],
+        "contextual_notes": "文献中描述的实验背景对培养的影响"
+    }},
+    
+    "inductive_summary": {{
+        "primary_findings": "文献中反复出现的主要发现",
+        "consensus_points": "多篇文献的共识性观点",
+        "conflicting_evidence": "文献间存在分歧的证据（如有）",
+        "knowledge_gaps": "文献中未覆盖的信息缺口",
+        "practical_recommendations": "基于文献整合的实际操作建议"
+    }}
 }}
 
-要求：
-1. 如该细胞确实无特殊难点，请返回空数组并说明为常规培养细胞
-2. 描述要具体（包含试剂名称、时间参数、浓度等）
-3. 对于HK-2（人肾小管上皮细胞）、NCI-H226（肺癌细胞）等常见细胞系，请基于ATCC或常规培养知识提供信息
-4. 必须区分：是文献明确报道的难点，还是AI基于该细胞类型的一般特点推断的潜在难点
-5. 对于肾癌细胞系（如HK-2）、肺癌细胞系（如NCI-H226），请特别说明其特殊的培养要求"""
+严格要求：
+1. 【禁止推测】没有文献支持的信息一律不输出，返回空数组
+2. 【必须标注来源】每个具体描述后必须标注[PMID:XXXX]
+3. 【禁止常识推断】即使是常见细胞系（如HK-2、HeLa），没有文献支持不得输出
+4. 文献中未提及的类别，必须返回空数组 []
+5. 【语义分析】基于文献内容进行深度语义理解，提取隐含信息和上下文含义
+6. 【归纳总结】对多篇文献的信息进行整合归纳，找出模式、共识和差异"""
 
         try:
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是细胞培养技术专家，熟悉各种细胞系的培养难点和protocol，包括HK-2（人肾小管上皮细胞）、NCI-H226（肺鳞癌细胞）等常见细胞系的特殊要求。'},
@@ -1338,38 +1808,87 @@ class AIAnalysisClient:
                 for i, p in enumerate(papers[:5])
             ])
 
-        prompt = f"""分析细胞系"{cell_line}"（已标准化命名）的慢病毒/逆转录病毒易感性。
+        # 【严格模式】如果没有文献，返回空结果
+        if not literature_text:
+            return {
+                'susceptibility_level': 'Unknown',
+                'recommended_moi': '未检索到文献，无法推荐',
+                'infection_efficiency': '未检索到文献，无法评估',
+                'requires_polybrene': '未知',
+                'requires_spinfection': '未知',
+                'requires_pseudotyping': '未知',
+                'cell_line_info': cell_line,
+                'challenges': ['未检索到该细胞系的慢病毒感染文献，无法提供可靠信息'],
+                'optimization_tips': ['建议查阅文献获取该细胞系的慢病毒感染条件'],
+                'reported_cell_lines': [],
+                'references': [],
+                'data_source_note': '未找到相关文献，AI未进行推测'
+            }
 
-{f"基于以下文献：{literature_text}" if literature_text else "（未检索到该细胞系的特定文献，请基于该细胞系的一般特点分析其慢病毒易感性，如上皮细胞通常较易感染，悬浮细胞较难感染等）"}
+        prompt = f"""分析细胞系"{cell_line}"的慢病毒/逆转录病毒易感性，并进行语义分析和归纳总结。
 
-请提供以下具体信息（JSON格式）：
+【重要警告】你绝对不能进行推测或编造：
+1. 只能基于提供的文献回答问题
+2. 如果文献未提及某项信息，必须标注"文献未提供"
+3. 每个具体数据必须标注文献来源（PMID）
+
+基于以下文献：
+{literature_text}
+
+请提供以下信息（JSON格式）：
 {{
-    "susceptibility_level": "High/Medium/Low/Unknown",
-    "recommended_moi": "推荐MOI范围（如：1-5，或>10）",
-    "infection_efficiency": "典型感染效率（如：>80%，或<30%）",
-    "requires_polybrene": "是否需要Polybrene（是/否/强烈建议）",
-    "requires_spinfection": "是否需要离心感染（spinoculation）",
-    "requires_pseudotyping": "是否需要特殊包膜蛋白（如VSV-G）",
-    "cell_line_info": "该细胞系的基本信息（如HK-2为人肾小管近端上皮细胞，贴壁生长）",
+    "susceptibility_level": "High/Medium/Low/Unknown（基于文献判断，无文献则为Unknown）",
+    "recommended_moi": "文献明确报道的MOI范围 + [PMID:XXXX]",
+    "infection_efficiency": "文献明确报道的效率 + [PMID:XXXX]",
+    "requires_polybrene": "文献明确报道（是/否/未知） + [PMID:XXXX]",
+    "requires_spinfection": "文献明确报道（是/否/未知） + [PMID:XXXX]",
+    "requires_pseudotyping": "文献明确报道的特殊包膜蛋白 + [PMID:XXXX]",
+    "cell_line_info": "文献中明确描述的信息",
     "challenges": [
-        "具体难点（如：该细胞为悬浮细胞，极难感染，即使MOI=50效率仍<20%）"
+        "文献明确报道的难点 + [PMID:XXXX]"
     ],
     "optimization_tips": [
-        "优化建议（如：建议使用polybrene 8μg/ml，离心感染1000xg 1小时）"
+        "文献明确报道的优化方法 + [PMID:XXXX]"
     ],
     "reported_cell_lines": [
-        "文献中报道过的类似细胞（如：A549类似肺癌细胞系）"
+        "文献中提到的相关细胞系 + [PMID:XXXX]"
     ],
-    "references": ["支持文献或'基于细胞系类型的一般特点'"]
-}}"""
+    "references": ["PMID:XXXX（文献标题）"],
+    "data_source_note": "基于X篇文献分析，所有信息均有文献支持",
+    
+    "semantic_analysis": {{
+        "infection_profile": "基于文献的感染特性语义描述（如：易感性高但效率不稳定）",
+        "critical_parameters": ["文献强调的关键感染参数"],
+        "failure_modes": ["文献中描述的感染失败模式"],
+        "optimization_potential": "文献暗示的优化潜力评估"
+    }},
+    
+    "inductive_summary": {{
+        "successful_strategies": "文献中反复出现的成功感染策略",
+        "common_pitfalls": "多篇文献共同指出的常见问题",
+        "efficiency_patterns": "感染效率的文献模式总结",
+        "experimental_context": "文献中实验条件对结果的影响"
+    }}
+}}
+
+严格要求：
+1. 【禁止推测】文献未明确报道的信息必须标注"文献未提供"或"Unknown"
+2. 【必须标注来源】每个具体数据后必须标注[PMID:XXXX]
+3. 【禁止常识推断】即使是一般规律，没有文献支持不得输出
+4. 如果文献未提供足够信息，返回"Unknown"而非推测
+5. 【语义分析】深度理解文献中的隐含信息和上下文
+6. 【归纳总结】整合多篇文献的发现，提取共性规律和差异"""
 
         try:
             headers = {
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json'
             }
+            # 获取当前选择的AI模型（从session_state或默认值）
+            current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
+            
             payload = {
-                'model': 'qwen-turbo',
+                'model': current_model,
                 'input': {
                     'messages': [
                         {'role': 'system', 'content': '你是病毒学专家，精通慢病毒载体和细胞转导，熟悉各种细胞系的慢病毒感染特性。'},
@@ -1693,15 +2212,25 @@ class HPAGeneAutocompleteService:
             logger.error(f"构建HPA基因索引失败: {e}")
     
     def _add_to_index(self, name: str, gene_symbol: str, ensembl_id: str, name_type: str):
-        """添加名称到搜索索引"""
+        """添加名称到搜索索引 - 支持一个名称对应多个基因（如ERIS对应CISD2和STING1）"""
         norm = self._normalize(name)
-        if norm and norm not in self.search_index:
-            self.search_index[norm] = {
-                'gene_symbol': gene_symbol,
-                'ensembl_id': ensembl_id,
-                'name_type': name_type,
-                'original_name': name
-            }
+        if not norm:
+            return
+        
+        entry = {
+            'gene_symbol': gene_symbol,
+            'ensembl_id': ensembl_id,
+            'name_type': name_type,
+            'original_name': name
+        }
+        
+        if norm not in self.search_index:
+            self.search_index[norm] = [entry]
+        else:
+            # 检查是否已存在相同的基因符号
+            existing_symbols = {e['gene_symbol'].upper() for e in self.search_index[norm]}
+            if gene_symbol.upper() not in existing_symbols:
+                self.search_index[norm].append(entry)
     
     def _normalize(self, name: str) -> str:
         """标准化名称用于搜索"""
@@ -1724,6 +2253,7 @@ class HPAGeneAutocompleteService:
         """
         获取基因建议（输入2个字符以上显示建议）
         匹配逻辑：精确匹配 > 前缀匹配 > 包含匹配 > 模糊匹配
+        修复：正确处理一个同义词对应多个基因的情况（如ERIS -> CISD2, STING1）
         """
         if not query or len(query) < 2:
             return []
@@ -1735,71 +2265,50 @@ class HPAGeneAutocompleteService:
         matches = []
         seen_genes = set()
         
+        # 辅助函数：添加匹配结果
+        def add_matches(entries: list, match_type: str, score: int):
+            """添加匹配条目，处理一个名称对应多个基因的情况"""
+            for entry in entries:
+                gene_symbol = entry['gene_symbol']
+                gene_key = gene_symbol.upper()
+                
+                if gene_key not in seen_genes:
+                    matches.append({
+                        'display_name': gene_symbol,
+                        'gene_symbol': gene_symbol,
+                        'match_type': match_type,
+                        'matched_name': entry['original_name'],
+                        'name_type': entry['name_type'],
+                        'score': score
+                    })
+                    seen_genes.add(gene_key)
+        
         # 1. 精确匹配
         if query_norm in self.search_index:
-            info = self.search_index[query_norm]
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes:
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'exact',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 100
-                })
-                seen_genes.add(gene_symbol.upper())
+            add_matches(self.search_index[query_norm], 'exact', 100)
         
         # 2. 前缀匹配
-        for norm, info in self.search_index.items():
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes and norm.startswith(query_norm):
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'prefix',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 80 - len(norm)
-                })
-                seen_genes.add(gene_symbol.upper())
+        for norm, entries in self.search_index.items():
+            if norm.startswith(query_norm):
+                add_matches(entries, 'prefix', 80 - len(norm))
                 if len(seen_genes) >= limit * 2:
                     break
         
         # 3. 包含匹配
-        for norm, info in self.search_index.items():
-            gene_symbol = info['gene_symbol']
-            if gene_symbol.upper() not in seen_genes and query_norm in norm:
-                matches.append({
-                    'display_name': gene_symbol,
-                    'gene_symbol': gene_symbol,
-                    'match_type': 'substring',
-                    'matched_name': info['original_name'],
-                    'name_type': info['name_type'],
-                    'score': 50
-                })
-                seen_genes.add(gene_symbol.upper())
+        for norm, entries in self.search_index.items():
+            if query_norm in norm:
+                add_matches(entries, 'substring', 50)
                 if len(seen_genes) >= limit * 2:
                     break
         
         # 4. 模糊匹配（查询3字符以上）
         if len(query_norm) >= 3:
-            for norm, info in self.search_index.items():
-                gene_symbol = info['gene_symbol']
-                if gene_symbol.upper() not in seen_genes:
-                    sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
-                    if sim > 0.6:
-                        matches.append({
-                            'display_name': gene_symbol,
-                            'gene_symbol': gene_symbol,
-                            'match_type': 'fuzzy',
-                            'matched_name': info['original_name'],
-                            'name_type': info['name_type'],
-                            'score': int(sim * 40)
-                        })
-                        seen_genes.add(gene_symbol.upper())
-                        if len(seen_genes) >= limit * 2:
-                            break
+            for norm, entries in self.search_index.items():
+                sim = difflib.SequenceMatcher(None, query_norm, norm).ratio()
+                if sim > 0.6:
+                    add_matches(entries, 'fuzzy', int(sim * 40))
+                    if len(seen_genes) >= limit * 2:
+                        break
         
         # 排序并限制数量
         matches.sort(key=lambda x: (x['score'], x['display_name']), reverse=True)
@@ -3158,10 +3667,8 @@ class TranscriptSelector:
             if transcripts:
                 logger.info(f"NCBI RefSeq获取成功: {len(transcripts)}个转录本")
             
-            # 显示调试信息
-            if hasattr(self.ncbi, '_last_transcript_debug') and self.ncbi._last_transcript_debug:
-                st.caption(f"📊 NCBI搜索详情: {' | '.join(self.ncbi._last_transcript_debug)}")
-                
+            # 调试信息已移除
+            
         except Exception as e:
             logger.error(f"NCBI RefSeq获取失败: {e}")
             st.warning(f"⚠️ NCBI RefSeq获取失败: {e}")
@@ -3702,11 +4209,22 @@ class GeneInputComponent:
                 logger.error(f"HPA数据下载失败: {e}")
                 st.error(f"数据下载失败: {e}")
 
+        # 使用session_state绑定输入框值，确保选中后能正确更新显示
+        input_widget_key = f"{key_prefix}_text_widget"
+        
+        # 确保session_state中的值与widget同步
+        # 如果已选中基因，强制更新widget的值为选中的基因名
+        if st.session_state.get(selected_key) and st.session_state.get(input_key):
+            # 确保widget值与session_state一致
+            if input_widget_key in st.session_state:
+                if st.session_state[input_widget_key] != st.session_state[input_key]:
+                    st.session_state[input_widget_key] = st.session_state[input_key]
+        
         user_input = st.text_input(
             input_label,
             value=st.session_state[input_key],
             placeholder="例如：TP53, EGFR, GAPDH...",
-            key=f"{key_prefix}_text_widget",
+            key=input_widget_key,
             disabled=disabled
         )
 
@@ -3749,7 +4267,9 @@ class GeneInputComponent:
                 safe_rerun()
 
         suggestions = st.session_state.get(suggestions_key, [])
-        if suggestions and not st.session_state[selected_key]:
+        selected_symbol = st.session_state.get(selected_key, '')
+        
+        if suggestions:
             st.caption(f"💡 HPA基因匹配 ({len(suggestions)}个建议)：")
             cols = st.columns(min(len(suggestions), 4))
             for i, gene in enumerate(suggestions):
@@ -3759,18 +4279,22 @@ class GeneInputComponent:
                     matched_name = gene.get('matched_name', '')
                     name_type = gene.get('name_type', '')
                     
-                    # 显示匹配类型图标
-                    icons = {'exact': '✓', 'prefix': '↳', 'substring': '~', 'fuzzy': '≈'}
-                    icon = icons.get(match_type, '•')
-                    
                     # 如果匹配的是synonym，显示原始匹配名
                     if name_type == 'synonym' and matched_name and matched_name.upper() != gene['symbol'].upper():
-                        display_text = f"{icon} {gene['symbol']} (via {matched_name})"
-                    else:
-                        display_text = f"{icon} {gene['symbol']}"
+                        display_text = f"{gene['symbol']} (via {matched_name})"
                     
-                    btn_type = "primary" if match_type == 'exact' else "secondary"
-                    help_text = f"匹配: {matched_name} ({match_type})" if matched_name else f"匹配类型: {match_type}"
+                    # 检查是否已选中
+                    is_selected = selected_symbol == gene['symbol']
+                    
+                    # 选中状态显示勾选符号，最高分用primary强调
+                    if is_selected:
+                        display_text = f"✓ {display_text}"
+                        btn_type = "primary"
+                        help_text = "已选中"
+                    else:
+                        is_highest_score = i == 0 and len(suggestions) > 0
+                        btn_type = "primary" if is_highest_score else "secondary"
+                        help_text = f"匹配: {matched_name} ({match_type})" if matched_name else f"匹配类型: {match_type}"
                     
                     if st.button(display_text, key=f"{key_prefix}_sug_{i}", use_container_width=True, type=btn_type, help=help_text):
                         st.session_state[selected_key] = gene['symbol']
@@ -3784,15 +4308,15 @@ class GeneInputComponent:
                         
                         safe_rerun()
 
-        if st.session_state[selected_key]:
-            gene_symbol = st.session_state[selected_key]
+        if selected_symbol:
+            gene_symbol = selected_symbol
             
             # 如果还没有HPA详情，获取它
             if self.hpa_detail_service and not st.session_state.get(hpa_info_key):
                 hpa_details = self.hpa_detail_service.get_gene_details(gene_symbol)
                 st.session_state[hpa_info_key] = hpa_details
             
-            # 显示选择信息
+            # 显示选择确认信息
             if f"{key_prefix}_info" in st.session_state:
                 gene_info = st.session_state[f"{key_prefix}_info"]
                 match_info = ""
@@ -3800,9 +4324,10 @@ class GeneInputComponent:
                     match_info = f" (匹配自: {gene_info['matched_name']})"
                 st.success(f"✓ 已选择HPA基因: **{gene_info['symbol']}**{match_info}")
             
-            # 显示HPA详细信息面板
+            # HPA基因详细信息在结果显示页面展示，不在输入界面显示
+            # 仅保存信息到session_state供后续使用
             if st.session_state.get(hpa_info_key):
-                self._render_hpa_gene_info(st.session_state[hpa_info_key])
+                pass  # 信息已保存，在render_results中展示
             
             return gene_symbol
         elif user_input:
@@ -3927,7 +4452,13 @@ class GeneInputComponent:
             
             if rna_table_data:
                 df_rna = pd.DataFrame(rna_table_data)
-                st.table(df_rna)
+                # 将表达特异性、表达量列中的分号替换为换行符
+                if '表达特异性' in df_rna.columns:
+                    df_rna['表达特异性'] = df_rna['表达特异性'].str.replace('; ', '<br>', regex=False)
+                if '表达量' in df_rna.columns:
+                    df_rna['表达量'] = df_rna['表达量'].str.replace('; ', '<br>', regex=False)
+                # 使用 HTML 渲染以支持换行
+                st.markdown(df_rna.to_html(escape=False, index=False), unsafe_allow_html=True)
                 
                 # 数据解读结论
                 st.markdown("**📌 数据解读**")
@@ -4027,6 +4558,541 @@ class ReportExporter:
             return df.to_csv(index=False)
         except Exception as e:
             return f"Error generating CSV: {str(e)}"
+
+# ==================== 四步法序列设计模块（用户定义版）====================
+class FourStepSequenceDesign:
+    """
+    四步法序列设计模块 - 按用户需求实现
+    
+    | 步骤 | 内容 |
+    |------|------|
+    | 步骤1 | 检索文献，找到目的基因敲低/敲除文章（增加物种限定搜索） |
+    | 步骤2 | 提取Methods中的序列，或标记"序列在补充材料" |
+    | 步骤3 | 检索公开专利 |
+    | 步骤4 | 核对物种一致性（标记提醒模式） |
+    """
+    
+    def __init__(self, ncbi_client: NCBIClient):
+        self.ncbi = ncbi_client
+    
+    def execute(self, gene_name: str, experiment_type: str, organism: str) -> Dict:
+        """
+        执行四步法序列设计
+        
+        Args:
+            gene_name: 基因名
+            experiment_type: 'knockdown' 或 'knockout'
+            organism: 物种（如 human, mouse）
+        
+        Returns:
+            四步法结果字典
+        """
+        result = {
+            'gene_name': gene_name,
+            'experiment_type': experiment_type,
+            'organism': organism,
+            'step1_literature_search': {},
+            'step2_extract_sequences': {},
+            'step3_patent_search': {},
+            'step4_species_check': {}
+        }
+        
+        # 步骤1: 检索文献（带物种限定）
+        result['step1_literature_search'] = self._step1_search_literature(
+            gene_name, experiment_type, organism
+        )
+        
+        # 步骤2: 提取Methods中的序列
+        result['step2_extract_sequences'] = self._step2_extract_sequences(
+            gene_name, experiment_type, organism, 
+            result['step1_literature_search'].get('papers', [])
+        )
+        
+        # 步骤3: 检索公开专利
+        result['step3_patent_search'] = self._step3_search_patents(gene_name)
+        
+        # 步骤4: 核对物种一致性
+        result['step4_species_check'] = self._step4_check_species(
+            gene_name, organism, result
+        )
+        
+        return result
+    
+    def _step1_search_literature(self, gene_name: str, experiment_type: str, organism: str) -> Dict:
+        """
+        步骤1: 检索文献，找到目的基因敲低/敲除文章（NCBI-PMC + PubMed，中国可直接访问）
+        
+        策略：
+        1. 优先使用NCBI-PMC（PubMed Central）全文数据库，中国可直接访问
+        2. 使用多种查询策略覆盖不同文献类型
+        3. 增加专利分类号（IPC）辅助检索（如C12N15/113）
+        """
+        result = {
+            'query': '',
+            'papers': [],
+            'pmc_papers': [],  # 有PMC全文的文章
+            'total_found': 0,
+            'pmc_available': 0,
+            'search_strategies': []
+        }
+        
+        try:
+            # 构建带物种限定的查询
+            organism_map = {
+                'human': 'Homo sapiens',
+                'mouse': 'Mus musculus',
+                'rat': 'Rattus norvegicus',
+                'cho': 'Cricetulus griseus',
+                'pig': 'Sus scrofa',
+                'monkey': 'Macaca mulatta'
+            }
+            organism_name = organism_map.get(organism.lower(), organism)
+            organism_term = organism_name.replace(' ', '+')
+            
+            # 多种查询策略
+            if experiment_type.lower() == 'knockdown':
+                queries = [
+                    # 策略1：标准siRNA/shRNA检索
+                    f'({gene_name}[Title/Abstract])+AND+(siRNA+OR+shRNA+OR+"small+interfering"+OR+"short+hairpin")+AND+({organism_term}[Title/Abstract])',
+                    # 策略2：Methods部分检索（PMC优势）
+                    f'({gene_name}[Title/Abstract])+AND+("Materials+and+Methods"+OR+"oligonucleotide"+OR+"targeting+sequence")+AND+(siRNA+OR+shRNA)',
+                    # 策略3：序列特征检索
+                    f'({gene_name}[Title/Abstract])+AND+("5\'-"+AND+"-3\'")+AND+(knockdown+OR+silencing)',
+                ]
+            else:  # knockout
+                queries = [
+                    # 策略1：标准CRISPR/sgRNA检索
+                    f'({gene_name}[Title/Abstract])+AND+(CRISPR+OR+"gene+editing"+OR+sgRNA+OR+gRNA+OR+"guide+RNA")+AND+({organism_term}[Title/Abstract])',
+                    # 策略2：Methods部分检索
+                    f'({gene_name}[Title/Abstract])+AND+("Materials+and+Methods"+OR+"guide+sequence"+OR+"spacer+sequence")+AND+(knockout+OR+CRISPR)',
+                    # 策略3：专利相关分类
+                    f'({gene_name}[Title/Abstract])+AND+(C12N15/113[MeSH+Terms]+OR+C12N15/1135[MeSH+Terms])',
+                ]
+            
+            all_pmids = set()
+            papers_map = {}
+            
+            # 执行多种策略检索
+            for i, query in enumerate(queries, 1):
+                try:
+                    search_params = {
+                        'db': 'pubmed',
+                        'term': query,
+                        'retmode': 'json',
+                        'retmax': 15,
+                        'sort': 'relevance'
+                    }
+                    
+                    search_result = self.ncbi._make_request('esearch.fcgi', search_params)
+                    if search_result:
+                        pmids = search_result.get('esearchresult', {}).get('idlist', [])
+                        result['search_strategies'].append({
+                            'strategy': f'策略{i}',
+                            'query': query[:100] + '...',
+                            'found': len(pmids)
+                        })
+                        for pmid in pmids[:10]:
+                            all_pmids.add(pmid)
+                except Exception as e:
+                    logger.warning(f'检索策略{i}失败: {e}')
+                    continue
+            
+            result['total_found'] = len(all_pmids)
+            
+            if not all_pmids:
+                result['message'] = '未找到相关文献'
+                return result
+            
+            # 获取文献详情
+            pmid_list = list(all_pmids)[:15]
+            fetch_params = {
+                'db': 'pubmed',
+                'id': ','.join(pmid_list),
+                'retmode': 'json'
+            }
+            
+            fetch_result = self.ncbi._make_request('esummary.fcgi', fetch_params)
+            if not fetch_result:
+                result['error'] = '获取文献详情失败'
+                return result
+            
+            docs = fetch_result.get('result', {})
+            
+            # 检查PMC可用性（是否有全文）
+            try:
+                link_params = {
+                    'dbfrom': 'pubmed',
+                    'db': 'pmc',
+                    'id': ','.join(pmid_list),
+                    'retmode': 'json'
+                }
+                link_result = self.ncbi._make_request('elink.fcgi', link_params)
+                pmcid_map = {}
+                if link_result and link_result.get('linksets'):
+                    for linkset in link_result.get('linksets', []):
+                        pmid = linkset.get('ids', [None])[0]
+                        for linksetdb in linkset.get('linksetdbs', []):
+                            if linksetdb.get('dbto') == 'pmc':
+                                pmcids = linksetdb.get('links', [])
+                                if pmcids:
+                                    pmcid_map[pmid] = pmcids[0]
+            except Exception as e:
+                logger.warning(f'PMC链接查询失败: {e}')
+                pmcid_map = {}
+            
+            papers = []
+            pmc_papers = []
+            
+            for pmid in pmid_list:
+                doc = docs.get(str(pmid), {})
+                if doc:
+                    paper = {
+                        'pmid': pmid,
+                        'title': doc.get('title', ''),
+                        'authors': [a.get('name', '') for a in doc.get('authors', [])[:3]],
+                        'journal': doc.get('fulljournalname', ''),
+                        'year': doc.get('pubdate', '')[:4] if doc.get('pubdate') else '',
+                        'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                        'has_pmc': pmid in pmcid_map,
+                        'pmcid': pmcid_map.get(pmid)
+                    }
+                    papers.append(paper)
+                    if paper['has_pmc']:
+                        paper['pmc_url'] = f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid_map[pmid]}/"
+                        pmc_papers.append(paper)
+            
+            result['papers'] = papers
+            result['pmc_papers'] = pmc_papers
+            result['pmc_available'] = len(pmc_papers)
+            
+            logger.info(f"文献检索完成: 总计{len(papers)}篇, PMC全文{len(pmc_papers)}篇")
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤1文献搜索失败: {e}")
+        
+        return result
+    
+    def _step2_extract_sequences(self, gene_name: str, experiment_type: str, 
+                                  organism: str, papers: List[Dict]) -> Dict:
+        """
+        步骤2: 从PMC开放获取全文中提取明确标注的序列
+        
+        借鉴原则（来自通用型文献sgRNA序列提取工具）：
+        - 仅从NCBI PMC开放获取全文中提取明确标注的序列
+        - 不预测、不补全、不依赖外部数据库
+        - 输出结果必须经人工对照原文/补充材料验证
+        """
+        import re
+        import xml.etree.ElementTree as ET
+        
+        result = {
+            'sequences_found': [],      # 提取到的序列
+            'in_methods': [],           # 在Methods中找到的文献
+            'in_supplementary': [],     # 可能在补充材料中的文献
+            'needs_manual_check': [],   # 需要人工查阅的文献
+            'verification_note': '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'
+        }
+        
+        # NCBI请求间隔（秒）- 遵守速率限制
+        RATE_LIMIT_SEC = 0.4
+        MAX_PAPERS_TO_CHECK = 10  # 最多检查10篇文献
+        
+        def fetch_pmc_fulltext(pmcid: str) -> str:
+            """下载PMC OA全文XML并提取纯文本"""
+            try:
+                fetch_params = {
+                    'db': 'pmc',
+                    'id': pmcid,
+                    'rettype': 'xml',
+                    'retmode': 'xml'
+                }
+                
+                import time
+                time.sleep(RATE_LIMIT_SEC)
+                
+                xml_data = self.ncbi._make_request('efetch.fcgi', fetch_params)
+                
+                if not xml_data:
+                    return ""
+                
+                # 如果是字符串，解析它
+                if isinstance(xml_data, str):
+                    try:
+                        root = ET.fromstring(xml_data)
+                    except ET.ParseError:
+                        return xml_data  # 返回原始文本
+                else:
+                    return str(xml_data)
+                
+                # 提取所有文本节点
+                text_parts = []
+                for elem in root.iter():
+                    if elem.text:
+                        text_parts.append(elem.text.strip())
+                    if elem.tail:
+                        text_parts.append(elem.tail.strip())
+                return " ".join(filter(None, text_parts))
+            except Exception as e:
+                logger.warning(f"无法获取 PMC{pmcid}: {e}")
+                return ""
+        
+        def extract_explicit_sgrna(text: str, gene: str) -> list:
+            """保守提取：仅匹配明确声明靶向该基因且长度18-22nt的序列"""
+            matches = []
+            # 模式1：显式标注 sgRNA/guide 序列
+            pat1 = re.compile(
+                rf'(?:{re.escape(gene)}.*?)(?:sgRNA|guide\s*RNA|targeting\s*sequence|gRNA)\s*(?:is|:|=)\s*([ATGCatgc]{{18,22}})',
+                re.IGNORECASE | re.DOTALL
+            )
+            # 模式2：5'-[ATGC]20-3' 格式
+            pat2 = re.compile(r"5'\s*-?\s*([ATGCatgc]{18,22})\s*-?\s*3'", re.IGNORECASE)
+            # 模式3：表格/补充材料常见标注
+            pat3 = re.compile(
+                r'(?:SEQ\s*ID\s*NO[:.]?\s*\d+\s*[=:]?\s*)([ATGCatgc]{18,22})',
+                re.IGNORECASE
+            )
+            # 模式4：shRNA/siRNA序列
+            pat4 = re.compile(
+                rf'(?:{re.escape(gene)}.*?)(?:shRNA|siRNA|hairpin)\s*(?:target|sequence|oligo)?\s*(?::|=)\s*([ATGCatgc]{{18,25}})',
+                re.IGNORECASE | re.DOTALL
+            )
+            
+            for pat in [pat1, pat2, pat3, pat4]:
+                for m in pat.finditer(text):
+                    seq = m.group(1).upper()
+                    if 18 <= len(seq) <= 25:
+                        matches.append(seq)
+            return list(set(matches))  # 去重
+        
+        try:
+            logger.info(f"🔍 开始从PMC全文中提取 {gene_name} 的序列")
+            
+            if not papers:
+                result['message'] = '无文献可供检查'
+                return result
+            
+            # 处理每篇文献
+            for i, paper in enumerate(papers[:MAX_PAPERS_TO_CHECK]):
+                pmid = paper.get('pmid')
+                title = paper.get('title', '')
+                
+                try:
+                    import time
+                    time.sleep(RATE_LIMIT_SEC)
+                    
+                    # 获取PMCID（仅OA文献有）
+                    link_params = {
+                        'dbfrom': 'pubmed',
+                        'db': 'pmc',
+                        'id': pmid,
+                        'retmode': 'json'
+                    }
+                    link_result = self.ncbi._make_request('elink.fcgi', link_params)
+                    
+                    if not link_result or not link_result.get('linksets'):
+                        result['needs_manual_check'].append({
+                            'pmid': pmid,
+                            'title': title,
+                            'reason': '无PMC开放获取全文，需通过PubMed或期刊网站查阅',
+                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                        })
+                        continue
+                    
+                    # 提取PMCID
+                    pmcid = None
+                    for linkset in link_result.get('linksets', []):
+                        for linksetdb in linkset.get('linksetdbs', []):
+                            if linksetdb.get('dbto') == 'pmc':
+                                links = linksetdb.get('links', [])
+                                if links:
+                                    pmcid = links[0]
+                                    break
+                        if pmcid:
+                            break
+                    
+                    if not pmcid:
+                        result['needs_manual_check'].append({
+                            'pmid': pmid,
+                            'title': title,
+                            'reason': '未找到PMCID，文献可能不在开放获取数据库中',
+                            'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                        })
+                        continue
+                    
+                    # 获取PMC全文
+                    full_text = fetch_pmc_fulltext(pmcid)
+                    
+                    if not full_text:
+                        result['needs_manual_check'].append({
+                            'pmid': pmid,
+                            'title': title,
+                            'pmcid': pmcid,
+                            'reason': '无法获取PMC全文，可能需要订阅',
+                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+                        })
+                        continue
+                    
+                    # 提取序列
+                    seqs = extract_explicit_sgrna(full_text, gene_name)
+                    
+                    if seqs:
+                        # 提取上下文片段
+                        context = re.search(
+                            rf'.{{0,150}}(?:{re.escape(gene_name)}).{{0,150}}', 
+                            full_text, re.IGNORECASE | re.DOTALL
+                        )
+                        context_str = context.group(0).replace("\n", " ")[:300] + "..." if context else "N/A"
+                        
+                        result['sequences_found'].append({
+                            'pmid': pmid,
+                            'pmcid': f"PMC{pmcid}",
+                            'title': title,
+                            'sequences': [
+                                {
+                                    'sequence': seq,
+                                    'length': len(seq),
+                                    'match_type': 'explicit'
+                                } for seq in seqs
+                            ],
+                            'context': context_str,
+                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/",
+                            'verification_status': '⚠️ 未验证（必须人工对照原文Supplementary/Sequence Listing）'
+                        })
+                        result['in_methods'].append(paper)
+                        logger.info(f"✅ 从 PMC{pmcid} 提取到 {len(seqs)} 条序列")
+                    else:
+                        # 全文已获取但未找到序列，可能在补充材料中
+                        result['in_supplementary'].append({
+                            'pmid': pmid,
+                            'pmcid': f"PMC{pmcid}",
+                            'title': title,
+                            'reason': '已获取全文但未找到明确标注的序列，可能在补充材料(Supplementary)中',
+                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+                        })
+                
+                except Exception as e:
+                    logger.warning(f"❌ 处理 PMID {pmid} 时出错: {e}")
+                    result['needs_manual_check'].append({
+                        'pmid': pmid,
+                        'title': title,
+                        'reason': f'处理出错: {str(e)[:100]}',
+                        'url': f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    })
+                    continue
+            
+            # 添加总结
+            result['summary'] = {
+                'total_papers_checked': len(papers[:MAX_PAPERS_TO_CHECK]),
+                'sequences_extracted': len(result['sequences_found']),
+                'in_supplementary': len(result['in_supplementary']),
+                'needs_manual_check': len(result['needs_manual_check'])
+            }
+            
+            logger.info(f"✅ 序列提取完成: {result['summary']}")
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤2序列提取失败: {e}")
+        
+        return result
+    
+    def _step3_search_patents(self, gene_name: str) -> Dict:
+        """
+        步骤3: 检索公开专利
+        """
+        result = {
+            'query': '',
+            'patents': [],
+            'total_found': 0
+        }
+        
+        try:
+            # 使用NCBI的Patent数据库搜索
+            # 注意：NCBI的专利搜索有限，这里使用Google Patents的链接
+            queries = [
+                f"{gene_name} shRNA",
+                f"{gene_name} siRNA",
+                f"{gene_name} CRISPR",
+                f"{gene_name} sgRNA"
+            ]
+            
+            result['query'] = queries
+            
+            # 构建Google Patents搜索链接
+            for query in queries:
+                encoded_query = query.replace(' ', '+')
+                result['patents'].append({
+                    'search_url': f"https://patents.google.com/?q={encoded_query}",
+                    'query': query,
+                    'note': '点击链接查看相关专利'
+                })
+            
+            result['total_found'] = len(queries)
+            result['note'] = '专利检索通过Google Patents进行，请访问上述链接查看详细结果'
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤3专利搜索失败: {e}")
+        
+        return result
+    
+    def _step4_check_species(self, gene_name: str, target_organism: str, 
+                             previous_results: Dict) -> Dict:
+        """
+        步骤4: 核对物种一致性（标记提醒模式）
+        
+        检查找到的文献和专利是否针对目标物种
+        """
+        result = {
+            'target_organism': target_organism,
+            'species_warnings': [],
+            'match_status': 'unknown'
+        }
+        
+        try:
+            # 检查文献的物种一致性
+            papers = previous_results.get('step1_literature_search', {}).get('papers', [])
+            
+            for paper in papers:
+                title_lower = paper.get('title', '').lower()
+                
+                # 简单的物种检测逻辑
+                species_detected = []
+                if 'human' in title_lower or 'patient' in title_lower or 'clinical' in title_lower:
+                    species_detected.append('human')
+                if 'mouse' in title_lower or 'mice' in title_lower or 'musculus' in title_lower:
+                    species_detected.append('mouse')
+                if 'rat' in title_lower or 'rattus' in title_lower:
+                    species_detected.append('rat')
+                
+                # 如果检测到物种但与目标不同，添加警告
+                if species_detected and target_organism.lower() not in species_detected:
+                    result['species_warnings'].append({
+                        'pmid': paper.get('pmid'),
+                        'title': paper.get('title'),
+                        'detected_species': species_detected,
+                        'target_species': target_organism,
+                        'warning': f'⚠️ 文献物种({", ".join(species_detected)})可能与目标物种({target_organism})不一致',
+                        'url': paper.get('url')
+                    })
+            
+            # 设置整体匹配状态
+            if result['species_warnings']:
+                result['match_status'] = 'mismatch_detected'
+            elif papers:
+                result['match_status'] = 'likely_match'
+            else:
+                result['match_status'] = 'no_data'
+            
+            result['summary'] = f"检查了{len(papers)}篇文献，发现{len(result['species_warnings'])}篇可能存在物种不一致"
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤4物种检查失败: {e}")
+        
+        return result
+
 
 # ==================== 主评估引擎（完整版） ====================
 class HybridAssessmentEngine:
@@ -4281,12 +5347,14 @@ class HybridAssessmentEngine:
                                     first_author = authors[0].get('name', '').split()[-1] if authors else 'Unknown'
                                     year = paper.get('pubdate', '')[:4] if paper.get('pubdate') else 'N/A'
                                     source = paper.get('source', 'N/A')
-                                    title = paper.get('title', '')[:60]
-                                    formatted_ref = f"{first_author} et al., {year}, {source}, PMID:{ref_pmid} - {title}..."
+                                    title = paper.get('title', '')
+                                    formatted_ref = f"{first_author} et al., {year}, {source}, PMID:{ref_pmid}"
+                                    if title:
+                                        formatted_ref += f" - {title}"
                                     valid_refs.append(formatted_ref)
                                 else:
                                     logger.warning(f"AI 生成了未检索到的 PMID: {ref_pmid}")
-                                    valid_refs.append(ref + " (PMID未验证)")
+                                    valid_refs.append(ref + " (数据返回异常，暂时无法提供PMID，需要自行使用标题搜索)")
                             else:
                                 # 没有 PMID，尝试模糊匹配标题
                                 ref_lower = str(ref).lower()
@@ -4298,15 +5366,17 @@ class HybridAssessmentEngine:
                                         first_author = authors[0].get('name', '').split()[-1] if authors else 'Unknown'
                                         year = paper.get('pubdate', '')[:4] if paper.get('pubdate') else 'N/A'
                                         source = paper.get('source', 'N/A')
-                                        title = paper.get('title', '')[:60]
-                                        formatted_ref = f"{first_author} et al., {year}, {source}, PMID:{pmid} - {title}..."
+                                        title = paper.get('title', '')
+                                        formatted_ref = f"{first_author} et al., {year}, {source}, PMID:{pmid}"
+                                        if title:
+                                            formatted_ref += f" - {title}"
                                         valid_refs.append(formatted_ref)
                                         matched = True
                                         break
                                 
                                 if not matched:
                                     # 无法匹配，保留原样但标记
-                                    valid_refs.append(str(ref)[:100] + "... (无法验证)")
+                                    valid_refs.append(str(ref)[:100] + "... (数据返回异常，暂时无法提供PMID，需要自行使用标题搜索)")
                         
                         function_analysis['key_references'] = valid_refs
                         function_analysis['references_verified'] = True
@@ -4465,6 +5535,7 @@ class HybridAssessmentEngine:
 
         # 序列设计
         if experiment_type.lower() in ['knockdown', 'knockout']:
+            # 原有的序列设计保留
             if experiment_type.lower() == 'knockdown':
                 # shRNA设计仍使用AI
                 if self.ai and self.ai.api_key:
@@ -4519,6 +5590,20 @@ class HybridAssessmentEngine:
                         'source': '检索失败',
                         'status': 'error'
                     }
+            
+            # ===== 四步法序列设计（新增）=====
+            try:
+                with st.spinner("正在执行四步法序列设计..."):
+                    four_step_designer = FourStepSequenceDesign(self.ncbi)
+                    four_step_result = four_step_designer.execute(
+                        gene_name=gene_name,
+                        experiment_type=experiment_type,
+                        organism=organism
+                    )
+                    result['four_step_design'] = four_step_result
+            except Exception as e:
+                logger.error(f"四步法设计失败: {e}")
+                result['four_step_design'] = {'error': str(e)}
 
         # 最终推荐
         try:
@@ -4598,8 +5683,9 @@ def render_sidebar():
                     try:
                         ai_test = QwenAnalyzer(api_key=final_qwen)
                         # 尝试一个简单的API调用
+                        current_model = st.session_state.get('selected_ai_model', DEFAULT_AI_MODEL)
                         test_response = ai_test._make_request({
-                            'model': 'qwen-turbo',
+                            'model': current_model,
                             'input': {
                                 'messages': [
                                     {'role': 'user', 'content': 'Hello'}
@@ -4635,15 +5721,16 @@ def render_main_panel():
     if 'cell_line_input' not in st.session_state:
         st.session_state.cell_line_input = ''
 
-    col1, col2 = st.columns(2)
-
     # 检查是否处于锁定状态
     is_locked = st.session_state.get('assessment_locked', False)
     
     if is_locked:
         st.warning("🔒 当前评估已锁定。如需进行新评估，请点击下方的「开始新评估」按钮。")
 
-    with col1:
+    # ===== 第一行：物种 + AI模型选择 =====
+    row1_col1, row1_col2 = st.columns(2)
+    
+    with row1_col1:
         organism = st.selectbox(
             "物种",
             ["human", "mouse", "rat", "cho", "pig", "monkey"],
@@ -4657,33 +5744,70 @@ def render_main_panel():
             }.get(x, x),
             disabled=is_locked
         )
-
-        # ===== HPA基因自动补全服务初始化 =====
-        if 'hpa_gene_service' not in st.session_state:
-            # 尝试从现有的HPA管理器获取数据文件路径
-            hpa_manager = st.session_state.get('hpa_manager')
-            if hpa_manager:
-                # 检查HPA数据是否可用
-                hpa_status = hpa_manager.check_and_download()
-                if hpa_status.get('error'):
-                    st.warning(f"⚠️ HPA数据下载失败: {hpa_status['error']}")
-                    st.info("📌 请刷新页面重新尝试下载")
-                elif not hpa_status.get('exists') and not hpa_status.get('downloaded'):
-                    st.warning("⚠️ HPA数据尚未下载")
-                    st.info("📌 首次使用需要下载约200MB数据，请刷新页面")
-            
-            st.session_state['hpa_gene_service'] = HPAGeneAutocompleteService(hpa_manager)
-            st.session_state['hpa_gene_detail_service'] = HPAGeneDetailService(hpa_manager)
+    
+    with row1_col2:
+        # AI模型选择
+        if 'selected_ai_model' not in st.session_state:
+            st.session_state['selected_ai_model'] = DEFAULT_AI_MODEL
         
-        hpa_gene_service = st.session_state.get('hpa_gene_service')
-        hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
+        selected_model = st.selectbox(
+            "AI模型",
+            list(AVAILABLE_AI_MODELS.keys()),
+            format_func=lambda x: AVAILABLE_AI_MODELS.get(x, x),
+            index=list(AVAILABLE_AI_MODELS.keys()).index(st.session_state['selected_ai_model']),
+            help="选择用于分析的AI模型。qwen-plus推荐用于生物医学分析",
+            disabled=is_locked,
+            key="ai_model_selector"
+        )
         
-        gene_service = GeneAutocompleteService()  # 保留用于其他可能的用途
-        # 基因输入完全基于HPA数据包（抛弃NCBI自动补全）
-        gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
-        gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
+        if selected_model != st.session_state['selected_ai_model']:
+            st.session_state['selected_ai_model'] = selected_model
+            st.toast(f"已切换到: {AVAILABLE_AI_MODELS[selected_model]}", icon="🤖")
 
-    with col2:
+    # ===== 第二行：转录本号 + （可选其他） =====
+    row2_col1, row2_col2 = st.columns(2)
+    
+    with row2_col1:
+        # 转录本号输入（可选）
+        transcript_id = st.text_input(
+            "转录本号（可选）",
+            value=st.session_state.get('transcript_id_input', ''),
+            placeholder="例如：NM_000546",
+            help="输入RefSeq转录本号（如NM_开头），用于精确指定转录本",
+            key="transcript_id_widget",
+            disabled=is_locked
+        )
+        if transcript_id != st.session_state.get('transcript_id_input', ''):
+            st.session_state['transcript_id_input'] = transcript_id
+    
+    with row2_col2:
+        # 预留位置，可以添加其他参数
+        st.empty()
+
+    # ===== HPA服务初始化（在基因输入之前） =====
+    if 'hpa_gene_service' not in st.session_state:
+        hpa_manager = st.session_state.get('hpa_manager')
+        if hpa_manager:
+            hpa_status = hpa_manager.check_and_download()
+            if hpa_status.get('error'):
+                st.warning(f"⚠️ HPA数据下载失败: {hpa_status['error']}")
+                st.info("📌 请刷新页面重新尝试下载")
+            elif not hpa_status.get('exists') and not hpa_status.get('downloaded'):
+                st.warning("⚠️ HPA数据尚未下载")
+                st.info("📌 首次使用需要下载约200MB数据，请刷新页面")
+        
+        st.session_state['hpa_gene_service'] = HPAGeneAutocompleteService(hpa_manager)
+        st.session_state['hpa_gene_detail_service'] = HPAGeneDetailService(hpa_manager)
+    
+    hpa_gene_service = st.session_state.get('hpa_gene_service')
+    hpa_detail_service = st.session_state.get('hpa_gene_detail_service')
+    gene_service = GeneAutocompleteService()
+
+    # ===== 第三行：细胞系 + 基因名 =====
+    row3_col1, row3_col2 = st.columns(2)
+    
+    with row3_col1:
+        # ===== HPA细胞系自动补全输入 =====
         # ===== HPA细胞系自动补全输入（新增功能）=====
         if 'cell_line_component' not in st.session_state:
             st.session_state.cell_line_component = HPACellLineAutocompleteService()
@@ -4709,18 +5833,14 @@ def render_main_panel():
 
         cell_line_value = None
         cell_metadata = None
-
-        # 显示自动补全建议
-        show_debug = st.checkbox("显示调试信息", value=False, key="debug_cell_line")
-        if show_debug:
-            st.write(f"Debug: cell_input='{cell_input}', selected={st.session_state.get('cell_line_selected')}")
-            st.write(f"Debug: service loaded={cell_service is not None}, index size={len(cell_service.search_index) if cell_service else 0}")
         
-        if cell_input and len(cell_input) >= 1 and not st.session_state.get('cell_line_selected'):
+        # 获取当前选中状态和输入
+        cell_input = st.session_state.get('cell_line_input', '')
+        selected_cell = st.session_state.get('cell_line_selected', None)
+
+        # 显示自动补全建议（始终显示，即使已选中）
+        if cell_input and len(cell_input) >= 1:
             suggestions = cell_service.get_suggestions(cell_input, limit=8)
-            
-            if show_debug:
-                st.write(f"Debug: suggestions count={len(suggestions)}")
 
             if suggestions:
                 st.caption(f"💡 HPA数据库匹配 ({len(suggestions)}个建议)：")
@@ -4728,11 +5848,20 @@ def render_main_panel():
 
                 for i, sug in enumerate(suggestions):
                     with cols[i % 4]:
-                        # 精确匹配显示特殊标记
-                        is_exact = sug['match_type'] == 'exact'
-                        label = f"✓ {sug['display_name']}" if is_exact else sug['display_name']
-                        btn_type = "primary" if is_exact else "secondary"
-                        help_text = f"匹配类型: {sug['match_type']}, 分数: {sug['score']}"
+                        # 检查是否已选中
+                        is_selected = selected_cell == sug['hpa_name']
+                        
+                        # 选中状态显示勾选符号
+                        if is_selected:
+                            label = f"✓ {sug['display_name']}"
+                            btn_type = "primary"
+                            help_text = "已选中"
+                        else:
+                            # 最高分（第一个）用primary强调
+                            is_highest_score = i == 0 and len(suggestions) > 0
+                            label = sug['display_name']
+                            btn_type = "primary" if is_highest_score else "secondary"
+                            help_text = f"匹配类型: {sug['match_type']}, 分数: {sug['score']}"
 
                         if st.button(label, key=f"cell_sug_{i}", use_container_width=True,
                                    type=btn_type, help=help_text):
@@ -4755,48 +5884,49 @@ def render_main_panel():
                 st.caption(f"💡 未找到匹配的HPA细胞系 (输入: '{cell_input}')")
                 st.info("提示：可继续输入或点击「开始评估」使用自定义名称")
 
-            # 检查是否有精确匹配但名称不同
-            exact_match = cell_service.get_exact_match(cell_input)
-            if exact_match and exact_match.upper() != cell_input.upper():
-                st.info(f"💡 检测到HPA标准名称: **{exact_match}** (与您输入的 '{cell_input}' 略有不同)")
-                col_yes, col_no = st.columns([1.5, 2])
-                with col_yes:
-                    if st.button(f"✓ 使用 {exact_match}", key="use_hpa_exact", type="primary"):
-                        st.session_state['cell_line_selected'] = exact_match
-                        st.session_state['cell_line_input'] = exact_match
-                        st.session_state['cell_line_validation'] = {
-                            'input': cell_input,
-                            'normalized': cell_service._normalize(exact_match),
-                            'is_valid': True,
-                            'hpa_standard_name': exact_match,
-                            'suggested_standard': exact_match,
-                            'confidence': 0.95,
-                            'match_type': 'exact',
-                            'needs_confirmation': False
-                        }
-                        safe_rerun()
-                with col_no:
-                    if st.button("保持原输入", key="keep_original"):
-                        st.session_state['cell_line_selected'] = cell_input
-                        st.session_state['cell_line_validation'] = {
-                            'input': cell_input,
-                            'normalized': cell_service._normalize(cell_input),
-                            'is_valid': False,
-                            'hpa_standard_name': None,
-                            'suggested_standard': cell_input,
-                            'confidence': 0.5,
-                            'match_type': 'none',
-                            'needs_confirmation': True,
-                            'warning': f"'{cell_input}' 不是标准HPA细胞系名称"
-                        }
-                        safe_rerun()
+            # 检查是否有精确匹配但名称不同（仅在未选中时显示）
+            if not selected_cell:
+                exact_match = cell_service.get_exact_match(cell_input)
+                if exact_match and exact_match.upper() != cell_input.upper():
+                    st.info(f"💡 检测到HPA标准名称: **{exact_match}** (与您输入的 '{cell_input}' 略有不同)")
+                    col_yes, col_no = st.columns([1.5, 2])
+                    with col_yes:
+                        if st.button(f"✓ 使用 {exact_match}", key="use_hpa_exact", type="primary"):
+                            st.session_state['cell_line_selected'] = exact_match
+                            st.session_state['cell_line_input'] = exact_match
+                            st.session_state['cell_line_validation'] = {
+                                'input': cell_input,
+                                'normalized': cell_service._normalize(exact_match),
+                                'is_valid': True,
+                                'hpa_standard_name': exact_match,
+                                'suggested_standard': exact_match,
+                                'confidence': 0.95,
+                                'match_type': 'exact',
+                                'needs_confirmation': False
+                            }
+                            safe_rerun()
+                    with col_no:
+                        if st.button("保持原输入", key="keep_original"):
+                            st.session_state['cell_line_selected'] = cell_input
+                            st.session_state['cell_line_validation'] = {
+                                'input': cell_input,
+                                'normalized': cell_service._normalize(cell_input),
+                                'is_valid': False,
+                                'hpa_standard_name': None,
+                                'suggested_standard': cell_input,
+                                'confidence': 0.5,
+                                'match_type': 'none',
+                                'needs_confirmation': True,
+                                'warning': f"'{cell_input}' 不是标准HPA细胞系名称"
+                            }
+                            safe_rerun()
 
-            cell_line_value = cell_input
+            cell_line_value = selected_cell if selected_cell else cell_input
             cell_metadata = st.session_state.get('cell_line_validation', {})
 
         # 显示已选择状态
-        if st.session_state.get('cell_line_selected'):
-            cell_line_value = st.session_state['cell_line_selected']
+        if selected_cell:
+            cell_line_value = selected_cell
             st.success(f"✓ 已选择HPA标准细胞系: **{cell_line_value}**")
 
             # 显示细胞类型提示
@@ -4812,6 +5942,11 @@ def render_main_panel():
                 'is_valid': cell_service.is_valid_cell_line(cell_line_value) if cell_line_value else False,
                 'hpa_standard_name': cell_line_value if cell_service.is_valid_cell_line(cell_line_value) else None
             }
+
+    with row3_col2:
+        # ===== 基因名输入（HPA自动补全）=====
+        gene_component = GeneInputComponent(hpa_gene_service, hpa_detail_service)
+        gene = gene_component.render(organism, key_prefix="main_gene", disabled=is_locked)
 
     exp_type = st.selectbox(
         "评估选项",
@@ -5048,14 +6183,6 @@ def render_results(result: Dict):
             elif status == 'success':
                 data = func_analysis.get('data', {})
                 lit_counts = func_analysis.get('literature_counts', {})
-                
-                # 详细调试：显示AI返回的原始数据
-                with st.expander("🔍 基因功能分析原始数据（调试）", expanded=False):
-                    st.write(f"**status**: {status}")
-                    st.write(f"**data类型**: {type(data)}")
-                    st.write(f"**data键**: {list(data.keys()) if isinstance(data, dict) else '不是字典'}")
-                    st.write(f"**完整data**:")
-                    st.json(data)
 
                 st.markdown("#### 文献覆盖统计")
                 cols = st.columns(4)
@@ -5065,17 +6192,6 @@ def render_results(result: Dict):
                 cols[3].metric("敲除研究", lit_counts.get('knockout', 0))
                 st.caption(f"来源: {func_analysis.get('source', 'AI分析')}")
                 
-                # 调试信息：显示原始文献计数
-                debug_mode = st.checkbox("显示文献检索调试信息", value=False, key="debug_literature")
-                if debug_mode:
-                    st.write(f"**文献检索原始计数**:")
-                    st.write(f"- general: {lit_counts.get('general', 0)}")
-                    st.write(f"- overexpression: {lit_counts.get('overexpression', 0)}")
-                    st.write(f"- knockdown: {lit_counts.get('knockdown', 0)}")
-                    st.write(f"- knockout: {lit_counts.get('knockout', 0)}")
-                    st.write(f"**AI分析数据键**: {list(data.keys()) if data else '无数据'}")
-                    st.write(f"**过表达数据**: {data.get('overexpression', {})}")
-
                 st.divider()
                 
                 # 检查是否有任何功能数据
@@ -5090,27 +6206,25 @@ def render_results(result: Dict):
                 if not has_any_data:
                     st.warning("⚠️ AI分析未返回具体功能数据")
                     st.info("可能原因：1) 检索到的文献数量不足 2) AI返回格式异常 3) 该基因研究较少")
-                    # 显示原始响应用于调试
-                    st.expander("查看AI原始响应").json(data)
 
                 if 'protein_function' in data and data['protein_function']:
-                    with st.expander("蛋白基础功能", expanded=True):
+                    with st.expander("🧬 蛋白基础功能", expanded=True):
                         pf = data['protein_function']
-                        st.write(f"**蛋白类别**: {pf.get('category', 'N/A')}")
-                        st.write(f"**结构域**: {pf.get('domains', 'N/A')}")
-                        st.write(f"**信号通路**: {pf.get('pathways', 'N/A')}")
-                        st.write(f"**亚细胞定位**: {pf.get('cellular_location', 'N/A')}")
-                        st.write(f"**组织表达**: {pf.get('tissue_expression', 'N/A')}")
+                        st.markdown(f"**蛋白类别**: {pf.get('category', 'N/A')}")
+                        st.markdown(f"**结构域**: {pf.get('domains', 'N/A')}")
+                        st.markdown(f"**信号通路**: {pf.get('pathways', 'N/A')}")
+                        st.markdown(f"**亚细胞定位**: {pf.get('cellular_location', 'N/A')}")
+                        st.markdown(f"**组织表达**: {pf.get('tissue_expression', 'N/A')}")
 
                 if 'overexpression' in data and data['overexpression']:
-                    with st.expander("过表达效应"):
+                    with st.expander("📈 过表达效应"):
                         oe = data['overexpression']
                         if 'cell_models' in oe and oe['cell_models']:
                             st.markdown("**细胞模型:**")
                             for model in oe['cell_models']:
                                 st.markdown(f"**• {model.get('cell_line', 'N/A')}**")
-                                st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
-                                st.markdown(f"  - 机制: {model.get('mechanism', 'N/A')}")
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;表型: {model.get('phenotype', 'N/A')}")
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;机制: {model.get('mechanism', 'N/A')}")
                                 # 改进文献展示
                                 ref = model.get('reference', 'N/A')
                                 if ref and ref != 'N/A':
@@ -5119,22 +6233,22 @@ def render_results(result: Dict):
                                     pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
                                     if pmid_match:
                                         pmid = pmid_match.group(1)
-                                        st.markdown(f"  - 文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
                                     else:
-                                        st.markdown(f"  - 文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
                                 st.markdown("---")
                         if 'summary' in oe and oe['summary']:
-                            st.success(f"**总结**: {oe['summary']}")
+                            st.markdown(f"> **总结**: {oe['summary']}")
 
                 if 'knockout' in data and data['knockout']:
-                    with st.expander("敲除效应"):
+                    with st.expander("🧪 敲除效应"):
                         ko = data['knockout']
                         if 'cell_models' in ko and ko['cell_models']:
                             st.markdown("**细胞模型:**")
                             for model in ko['cell_models']:
                                 st.markdown(f"**• {model.get('cell_line', 'N/A')}** ({model.get('method', '')})")
-                                st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
-                                st.markdown(f"  - 细胞活力: {model.get('viability', 'N/A')}")
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;表型: {model.get('phenotype', 'N/A')}")
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;细胞活力: {model.get('viability', 'N/A')}")
                                 # 改进文献展示
                                 ref = model.get('reference', 'N/A')
                                 if ref and ref != 'N/A':
@@ -5142,21 +6256,21 @@ def render_results(result: Dict):
                                     pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
                                     if pmid_match:
                                         pmid = pmid_match.group(1)
-                                        st.markdown(f"  - 文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
                                     else:
-                                        st.markdown(f"  - 文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
                                 st.markdown("---")
                         if 'summary' in ko and ko['summary']:
-                            st.success(f"**总结**: {ko['summary']}")
+                            st.markdown(f"> **总结**: {ko['summary']}")
 
                 if 'knockdown' in data and data['knockdown']:
-                    with st.expander("敲低效应"):
+                    with st.expander("🔻 敲低效应"):
                         kd = data['knockdown']
                         if 'cell_models' in kd and kd['cell_models']:
                             st.markdown("**细胞模型:**")
                             for model in kd['cell_models']:
                                 st.markdown(f"**• {model.get('cell_line', 'N/A')}** ({model.get('method', '')})")
-                                st.markdown(f"  - 表型: {model.get('phenotype', 'N/A')}")
+                                st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;表型: {model.get('phenotype', 'N/A')}")
                                 # 改进文献展示
                                 ref = model.get('reference', 'N/A')
                                 if ref and ref != 'N/A':
@@ -5164,22 +6278,22 @@ def render_results(result: Dict):
                                     pmid_match = re.search(r'PMID[:\s]*(\d+)', str(ref))
                                     if pmid_match:
                                         pmid = pmid_match.group(1)
-                                        st.markdown(f"  - 文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;文献: [{ref[:80]}...](https://pubmed.ncbi.nlm.nih.gov/{pmid}/) (PMID:{pmid})")
                                     else:
-                                        st.markdown(f"  - 文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
+                                        st.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;文献: {ref[:100]}{'...' if len(ref) > 100 else ''}")
                                 st.markdown("---")
                         if 'summary' in kd and kd['summary']:
-                            st.success(f"**总结**: {kd['summary']}")
+                            st.markdown(f"> **总结**: {kd['summary']}")
 
                 if 'disease_relevance' in data and data['disease_relevance']:
-                    with st.expander("疾病相关性"):
+                    with st.expander("🏥 疾病相关性"):
                         dr = data['disease_relevance']
-                        st.write(f"**肿瘤作用**: {dr.get('cancer', 'N/A')}")
-                        st.write(f"**其他疾病**: {dr.get('other_diseases', 'N/A')}")
-                        st.write(f"**治疗潜力**: {dr.get('therapeutic_potential', 'N/A')}")
+                        st.markdown(f"**肿瘤作用**: {dr.get('cancer', 'N/A')}")
+                        st.markdown(f"**其他疾病**: {dr.get('other_diseases', 'N/A')}")
+                        st.markdown(f"**治疗潜力**: {dr.get('therapeutic_potential', 'N/A')}")
 
                 if 'key_references' in data and data['key_references']:
-                    with st.expander("关键参考文献"):
+                    with st.expander("📚 关键参考文献"):
                         st.caption("⚠️ **注意**：以下引用基于AI分析的文献生成")
                         if data.get('references_verified'):
                             st.success("✓ 引用已与检索到的文献匹配")
@@ -5195,7 +6309,7 @@ def render_results(result: Dict):
                                 st.markdown(f"- {ref}")
 
                 if 'experimental_notes' in data and data['experimental_notes']:
-                    st.info(f"**实验设计建议**: {data['experimental_notes']}")
+                    st.markdown(f"> **实验设计建议**: {data['experimental_notes']}")
             else:
                 st.info("正在加载基因功能分析数据...")
         else:
@@ -5344,7 +6458,13 @@ def render_results(result: Dict):
                 
                 if rna_table_data:
                     df_rna = pd.DataFrame(rna_table_data)
-                    st.table(df_rna)
+                    # 将表达特异性、表达量列中的分号替换为换行符
+                    if '表达特异性' in df_rna.columns:
+                        df_rna['表达特异性'] = df_rna['表达特异性'].str.replace('; ', '<br>', regex=False)
+                    if '表达量' in df_rna.columns:
+                        df_rna['表达量'] = df_rna['表达量'].str.replace('; ', '<br>', regex=False)
+                    # 使用 HTML 渲染以支持换行
+                    st.markdown(df_rna.to_html(escape=False, index=False), unsafe_allow_html=True)
                     
                     # 数据解读结论
                     st.markdown("**📌 数据解读**")
@@ -5409,7 +6529,7 @@ def render_results(result: Dict):
 
                 st.divider()
 
-                st.subheader("细胞培养难点清单")
+                st.subheader("细胞培养难点")
                 culture_diff = cell_data.get('culture_difficulty', {})
                 if culture_diff and isinstance(culture_diff, dict):
                     if culture_diff.get('error'):
@@ -5422,113 +6542,56 @@ def render_results(result: Dict):
                             else:
                                 st.info(f"🤖 {note}")
 
-                        # 精简后的展示逻辑
-                        has_any = False
+                        # 整合所有培养难点信息为一段话总结
+                        difficulty_parts = []
                         
-                        # 1. 气体/环境敏感 - 只显示非5% CO2、非37°C时提示实际的培养条件，不然显示"37°C，5% CO2"
+                        # 收集各类难点信息（只保留非标准条件）
                         env_items = culture_diff.get('environment', [])
-                        env_display = []
-                        # 检查是否有特殊环境要求
-                        has_special_env = False
                         for item in env_items:
-                            # 排除常规条件
-                            if any(x in item for x in ['5% CO₂', '37℃', '37 °C', '37°C']):
-                                continue
-                            if '低氧' in item or '非5%' in item or '非37' in item or '震荡' in item or 'pH' in item:
-                                env_display.append(item)
-                                has_special_env = True
+                            if any(x in item for x in ['低氧', '非5%', '非37', '震荡', 'pH']):
+                                difficulty_parts.append(item)
                         
-                        with st.expander("🌡️ 气体/环境敏感", expanded=False):
-                            if has_special_env:
-                                for item in env_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e3f2fd; border-radius: 5px; border-left: 3px solid #2196F3;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>37°C，5% CO₂</div>", unsafe_allow_html=True)
-                        
-                        # 2. 操作复杂度 - 只有非0.25%胰酶消化时提示
                         op_items = culture_diff.get('operation', [])
-                        op_display = []
                         for item in op_items:
-                            # 排除0.25%胰酶（常规条件）
-                            if '0.25%胰酶' in item or '0.25% 胰酶' in item:
-                                continue
-                            op_display.append(item)
+                            if '0.25%胰酶' not in item and '0.25% 胰酶' not in item:
+                                difficulty_parts.append(item)
                         
-                        with st.expander("🔧 操作复杂度", expanded=False):
-                            if op_display:
-                                for item in op_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #fff3e0; border-radius: 5px; border-left: 3px solid #FF9800;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>常规操作，无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 3. 时间/成本 - 只有细胞增殖速度低（文献中特别提到增殖慢、倍增时间超过48小时）时提示
                         tc_items = culture_diff.get('time_cost', [])
-                        tc_display = []
                         for item in tc_items:
-                            # 只保留明确提到增殖慢、倍增时间>48小时的条目
                             if any(x in item for x in ['>48小时', '超过48小时', '倍增时间', '生长极其缓慢', '增殖慢', '生长缓慢']):
-                                tc_display.append(item)
+                                difficulty_parts.append(item)
                         
-                        with st.expander("⏱️ 时间/成本", expanded=False):
-                            if tc_display:
-                                for item in tc_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e8f5e9; border-radius: 5px; border-left: 3px solid #4CAF50;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>常规生长速度，无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 4. 关键警告 - 支原体属于常规管控项，不做提示。否则反馈"无特殊要求"
                         warn_items = culture_diff.get('special_warnings', [])
-                        warn_display = []
                         for item in warn_items:
-                            # 排除支原体相关（常规管控项）
-                            if '支原体' in item:
-                                continue
-                            warn_display.append(item)
+                            if '支原体' not in item:
+                                difficulty_parts.append(item)
                         
-                        with st.expander("⚠️ 关键警告", expanded=True):  # 关键警告默认展开
-                            if warn_display:
-                                for item in warn_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #ffcdd2; border-radius: 5px; border-left: 3px solid #f44336;'><strong>{html.escape(str(item))}</strong></div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 5. Protocol建议 - 只有提示必须每天换液、每天传代时提示。否则反馈"无特殊要求"
                         proto_items = culture_diff.get('protocol_tips', [])
-                        proto_display = []
                         for item in proto_items:
-                            # 只保留必须每天换液/传代的提示
                             if any(x in item for x in ['每天换液', '每天传代', '每日换液', '每日传代', '必须每天']):
-                                proto_display.append(item)
+                                difficulty_parts.append(item)
                         
-                        with st.expander("💡 Protocol建议", expanded=False):
-                            if proto_display:
-                                for item in proto_display:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #e0f7fa; border-radius: 5px; border-left: 3px solid #00BCD4;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-                                has_any = True
-                            else:
-                                st.markdown("<div style='margin: 5px 0; padding: 8px; background-color: #f5f5f5; border-radius: 5px;'>无特殊要求</div>", unsafe_allow_html=True)
-                        
-                        # 培养基和基质要求保持不变（始终显示，因为这些是重要的信息）
                         cm_items = culture_diff.get('culture_medium', [])
-                        if cm_items:
-                            has_any = True
-                            with st.expander("🧫 培养基特殊要求", expanded=False):
-                                for item in cm_items:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #ffebee; border-radius: 5px; border-left: 3px solid #E91E63;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
+                        difficulty_parts.extend(cm_items)
                         
                         coat_items = culture_diff.get('coating_matrix', [])
-                        if coat_items:
-                            has_any = True
-                            with st.expander("🔲 基质/包被要求", expanded=False):
-                                for item in coat_items:
-                                    st.markdown(f"<div style='margin: 5px 0; padding: 8px; background-color: #f3e5f5; border-radius: 5px; border-left: 3px solid #9C27B0;'>{html.escape(str(item))}</div>", unsafe_allow_html=True)
-
-                        if not has_any:
-                            st.success("✓ 未检索到该细胞系的特殊培养难点，可能为常规培养细胞")
+                        difficulty_parts.extend(coat_items)
+                        
+                        # 生成总结描述
+                        if difficulty_parts:
+                            # 去重并清理
+                            seen = set()
+                            unique_parts = []
+                            for part in difficulty_parts:
+                                clean_part = part.split('[PMID:')[0].strip() if '[PMID:' in part else part
+                                if clean_part not in seen:
+                                    seen.add(clean_part)
+                                    unique_parts.append(part)
+                            
+                            summary = "该细胞系培养需要注意以下方面：" + "；".join(unique_parts[:8]) + "。"
+                            st.markdown(f"<div style='padding: 12px; background-color: #f5f5f5; border-radius: 8px; border-left: 4px solid #2196F3; line-height: 1.6;'>" + summary + "</div>", unsafe_allow_html=True)
+                        else:
+                            st.markdown("<div style='padding: 12px; background-color: #e8f5e9; border-radius: 8px; border-left: 4px solid #4CAF50;'>该细胞系培养条件较为常规，按标准37°C、5% CO₂条件培养即可，无特殊难点。</div>", unsafe_allow_html=True)
 
                         if culture_diff.get('verified_by'):
                             with st.expander("支持文献/依据"):
@@ -5712,6 +6775,143 @@ def render_results(result: Dict):
                     st.error("序列设计数据格式异常")
         else:
             st.info("敲低和敲除实验可查看序列设计建议（从文献检索已报道的sgRNA）")
+        
+        # ==================== 四步法序列设计（用户定义版）====================
+        st.divider()
+        st.markdown("### 🎯 四步法序列设计")
+        
+        four_step = result.get('four_step_design', {})
+        if four_step and not four_step.get('error'):
+            # 创建四步法的子标签页
+            step_tabs = st.tabs([
+                "① 文献检索",
+                "② 序列提取", 
+                "③ 专利检索",
+                "④ 物种核对"
+            ])
+            
+            # Step 1: 文献检索
+            with step_tabs[0]:
+                st.markdown("#### 步骤1: 检索文献（带物种限定）")
+                step1 = four_step.get('step1_literature_search', {})
+                
+                if step1.get('query'):
+                    st.caption(f"**搜索策略**: `{step1['query']}`")
+                
+                if step1.get('papers'):
+                    st.success(f"**找到 {len(step1['papers'])} 篇相关文献**")
+                    for i, paper in enumerate(step1['papers'], 1):
+                        with st.expander(f"{i}. {paper.get('title', '')[:60]}..."):
+                            st.write(f"**标题**: {paper.get('title', '')}")
+                            st.write(f"**作者**: {', '.join(paper.get('authors', []))}")
+                            st.write(f"**期刊**: {paper.get('journal', '')} ({paper.get('year', '')})")
+                            st.markdown(f"**PubMed**: [{paper.get('pmid', '')}]({paper.get('url', '')})")
+                elif step1.get('total_found') == 0:
+                    st.warning("未找到相关文献")
+                
+                if step1.get('error'):
+                    st.error(f"检索错误: {step1['error']}")
+            
+            # Step 2: 序列提取
+            with step_tabs[1]:
+                st.markdown("#### 步骤2: 从PMC开放获取全文提取序列")
+                step2 = four_step.get('step2_extract_sequences', {})
+                
+                # 显示提取到的序列
+                sequences_found = step2.get('sequences_found', [])
+                if sequences_found:
+                    st.success(f"✅ 从 {len(sequences_found)} 篇PMC文献中提取到序列")
+                    st.warning(step2.get('verification_note', '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'))
+                    
+                    for i, item in enumerate(sequences_found, 1):
+                        with st.expander(f"📄 文献 {i}: {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
+                            st.markdown(f"**PMC全文**: [{item.get('pmcid', '')}]({item.get('url', '')})")
+                            
+                            st.write("**提取到的序列**:")
+                            for seq_data in item.get('sequences', []):
+                                seq = seq_data.get('sequence', '')
+                                match_type = seq_data.get('match_type', '')
+                                length = seq_data.get('length', 0)
+                                st.code(f"{seq} ({length}nt, {match_type})", language='text')
+                            
+                            with st.expander("查看上下文片段"):
+                                st.text(item.get('context', 'N/A'))
+                            
+                            st.error(f"**⚠️ {item.get('verification_status', '')}**")
+                
+                # 显示可能在补充材料中的文献
+                in_supplementary = step2.get('in_supplementary', [])
+                if in_supplementary:
+                    st.info(f"📎 可能在补充材料中的文献 ({len(in_supplementary)}篇)")
+                    for i, item in enumerate(in_supplementary, 1):
+                        with st.expander(f"{i}. {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PMC**: [{item.get('pmcid', '')}]({item.get('url', '')})")
+                            st.caption(f"💡 {item.get('reason', '')}")
+                
+                # 显示需要人工查阅的文献
+                needs_manual = step2.get('needs_manual_check', [])
+                if needs_manual:
+                    st.info(f"📋 需要人工查阅的文献 ({len(needs_manual)}篇)")
+                    for i, item in enumerate(needs_manual, 1):
+                        with st.expander(f"{i}. {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
+                            st.caption(f"💡 {item.get('reason', '')}")
+                
+                # 显示总结
+                if step2.get('summary'):
+                    summary = step2['summary']
+                    st.caption(f"**统计**: 检查了{summary.get('total_papers_checked', 0)}篇文献，"
+                              f"提取到{summary.get('sequences_extracted', 0)}篇的序列，"
+                              f"{summary.get('in_supplementary', 0)}篇可能在补充材料，"
+                              f"{summary.get('needs_manual_check', 0)}篇需人工查阅")
+            
+            # Step 3: 专利检索
+            with step_tabs[2]:
+                st.markdown("#### 步骤3: 检索公开专利")
+                step3 = four_step.get('step3_patent_search', {})
+                
+                if step3.get('patents'):
+                    st.success(f"**专利检索链接 ({len(step3['patents'])}个)**")
+                    for patent in step3['patents']:
+                        st.markdown(f"- **[{patent.get('query', '')}]({patent.get('search_url', '')})** - {patent.get('note', '')}")
+                
+                if step3.get('note'):
+                    st.info(f"💡 {step3['note']}")
+            
+            # Step 4: 物种核对
+            with step_tabs[3]:
+                st.markdown("#### 步骤4: 核对物种一致性（标记提醒模式）")
+                step4 = four_step.get('step4_species_check', {})
+                
+                st.write(f"**目标物种**: {step4.get('target_organism', 'N/A')}")
+                
+                warnings = step4.get('species_warnings', [])
+                if warnings:
+                    st.error(f"**⚠️ 发现 {len(warnings)} 篇文献可能存在物种不一致**")
+                    for warning in warnings:
+                        with st.expander(f"⚠️ {warning.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {warning.get('title', '')}")
+                            st.write(f"**检测到的物种**: {', '.join(warning.get('detected_species', []))}")
+                            st.write(f"**目标物种**: {warning.get('target_species', '')}")
+                            st.warning(warning.get('warning', ''))
+                            st.markdown(f"**PubMed**: [查看文献]({warning.get('url', '')})")
+                else:
+                    match_status = step4.get('match_status', 'unknown')
+                    if match_status == 'likely_match':
+                        st.success("✅ 未发现明显的物种不一致问题")
+                    elif match_status == 'no_data':
+                        st.info("ℹ️ 无足够数据核对物种")
+                
+                if step4.get('summary'):
+                    st.caption(step4['summary'])
+        else:
+            st.warning("四步法设计数据不可用")
+            if four_step.get('error'):
+                st.error(f"错误: {four_step['error']}")
 
     # ==================== 转录本选择 ====================
     with tabs[5]:
@@ -5905,20 +7105,20 @@ def main():
             st.exception(e)
     
     # ===== 底部：日志显示区域 =====
-    with st.expander("📋 应用日志（点击展开）", expanded=False):
-        if st.session_state['app_logs']:
+    # [日志区域已隐藏]     with st.expander("📋 应用日志（点击展开）", expanded=False):
+    # [日志区域已隐藏]         if st.session_state['app_logs']:
             # 复制按钮
-            log_text = "\n".join([f"[{log['time']}] {log['level']}: {log['message']}" 
-                                  for log in st.session_state['app_logs']])
-            st.text_area("日志内容（可复制）", log_text, height=200, key="log_display")
+    # [日志区域已隐藏]             log_text = "\n".join([f"[{log['time']}] {log['level']}: {log['message']}" 
+    # [日志区域已隐藏]                                   for log in st.session_state['app_logs']])
+    # [日志区域已隐藏]             st.text_area("日志内容（可复制）", log_text, height=200, key="log_display")
             
-            col1, col2 = st.columns([1, 5])
-            with col1:
-                if st.button("🗑️ 清空日志"):
-                    st.session_state['app_logs'] = []
-                    st.rerun()
-        else:
-            st.caption("暂无日志")
+    # [日志区域已隐藏]             col1, col2 = st.columns([1, 5])
+    # [日志区域已隐藏]             with col1:
+    # [日志区域已隐藏]                 if st.button("🗑️ 清空日志"):
+    # [日志区域已隐藏]                     st.session_state['app_logs'] = []
+    # [日志区域已隐藏]                     st.rerun()
+    # [日志区域已隐藏]         else:
+    # [日志区域已隐藏]             st.caption("暂无日志")
 
 if __name__ == "__main__":
     main()
