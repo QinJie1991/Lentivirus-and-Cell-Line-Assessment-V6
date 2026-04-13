@@ -2479,6 +2479,477 @@ class HPAGeneDetailService:
             }
         }
 
+# ==================== 内参基因选择服务 ====================
+class HousekeepingGeneSelector:
+    """
+    根据蛋白定位和组织/细胞系类型，推荐合适的内参基因并获取HPA表达量
+    """
+    
+    # 内参基因分类库
+    HK_GENES = {
+        'universal': {  # 普适性内参
+            'GAPDH': {
+                'gene_id': 'ENSG00000111640',
+                'localization': 'cytoplasm',
+                'pros': ['表达极高', '几乎所有细胞都有'],
+                'cons': ['应激/肿瘤中可能上调', '糖酵解相关'],
+                'typical_ntpm': '1000-5000',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000111640-GAPDH'
+            },
+            'ACTB': {
+                'gene_id': 'ENSG00000075624', 
+                'localization': 'cytoplasm (cytoskeleton)',
+                'pros': ['表达高', '细胞骨架相关'],
+                'cons': ['细胞形态变化时波动'],
+                'typical_ntpm': '1000-3000',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000075624-ACTB'
+            },
+            'PPIA': {
+                'gene_id': 'ENSG00000196262',
+                'localization': 'cytoplasm',
+                'pros': ['比GAPDH更稳定', '代谢酶非相关'],
+                'cons': ['表达量中等'],
+                'typical_ntpm': '200-800',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000196262-PPIA'
+            },
+            'HPRT1': {
+                'gene_id': 'ENSG00000165704',
+                'localization': 'cytoplasm',
+                'pros': ['较稳定', 'X染色体连锁'],
+                'cons': ['表达中等'],
+                'typical_ntpm': '50-200',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000165704-HPRT1'
+            }
+        },
+        'nuclear': {  # 核内参
+            'TBP': {
+                'gene_id': 'ENSG00000112592',
+                'localization': 'nucleus',
+                'pros': ['核蛋白研究金标准', '转录相关'],
+                'cons': ['表达相对较低'],
+                'typical_ntpm': '20-100',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000112592-TBP'
+            },
+            'RPLP0': {
+                'gene_id': 'ENSG00000163682',
+                'localization': 'nucleolus/ribosome',
+                'pros': ['核糖体RNA加工相关', '相对稳定'],
+                'cons': ['rRNA合成活跃时可能变化'],
+                'typical_ntpm': '500-1500',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000163682-RPLP0'
+            },
+            'HMBS': {
+                'gene_id': 'ENSG00000114120',
+                'localization': 'cytoplasm/nucleus',
+                'pros': ['多组织中较稳定'],
+                'cons': ['不如TBP专一核定位'],
+                'typical_ntpm': '100-300',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000114120-HMBS'
+            }
+        },
+        'membrane': {  # 膜内参
+            'ATP1A1': {
+                'gene_id': 'ENSG00000163399',
+                'localization': 'plasma membrane',
+                'pros': ['几乎所有细胞都有', '膜定位稳定'],
+                'cons': ['表达量因细胞类型而异'],
+                'typical_ntpm': '200-1000',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000163399-ATP1A1'
+            },
+            'TFRC': {
+                'gene_id': 'ENSG00000072274',
+                'localization': 'plasma membrane',
+                'pros': ['增殖细胞标记'],
+                'cons': ['非增殖细胞中表达低'],
+                'typical_ntpm': '50-500',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000072274-TFRC'
+            }
+        },
+        'mitochondrial': {  # 线粒体内参
+            'MT-CO1': {
+                'gene_id': 'ENSG00000198804',
+                'localization': 'mitochondria',
+                'pros': ['线粒体编码', '高拷贝'],
+                'cons': ['线粒体功能受损时变化'],
+                'typical_ntpm': '1000-10000',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000198804-MT-CO1'
+            },
+            'SDHA': {
+                'gene_id': 'ENSG00000073578',
+                'localization': 'mitochondria',
+                'pros': ['TCA循环关键酶'],
+                'cons': ['代谢状态影响'],
+                'typical_ntpm': '100-500',
+                'hpa_url': 'https://www.proteinatlas.org/ENSG00000073578-SDHA'
+            }
+        }
+    }
+    
+    # 核质分离对照
+    FRACTIONATION_CONTROLS = {
+        'cytoplasmic': {
+            'genes': ['GAPDH', 'ACTB'],
+            'rna_markers': ['GAPDH'],
+            'protein_markers': ['TUBA1A']
+        },
+        'nuclear': {
+            'genes': ['TBP', 'LMNB1'],
+            'rna_markers': ['MALAT1', 'U1'],
+            'protein_markers': ['HIST1H3A', 'LMNB1']
+        }
+    }
+    
+    # 组织类型到HPA组织名称的映射
+    TISSUE_MAP = {
+        'liver': 'liver',
+        'brain': 'cerebral cortex',
+        'kidney': 'kidney',
+        'lung': 'lung',
+        'heart': 'heart muscle',
+        'muscle': 'skeletal muscle',
+        'skin': 'skin',
+        'colon': 'colon',
+        'intestine': 'small intestine',
+        'stomach': 'stomach',
+        'spleen': 'spleen',
+        'thymus': 'thymus',
+        'testis': 'testis',
+        'ovary': 'ovary',
+        'prostate': 'prostate',
+        'breast': 'breast',
+        'pancreas': 'pancreas',
+        'adipose': 'adipose tissue',
+        'blood': 'bone marrow',
+        'lymph node': 'lymph node',
+        'tonsil': 'tonsil',
+        'appendix': 'appendix',
+        'duodenum': 'duodenum',
+        'placenta': 'placenta'
+    }
+    
+    def __init__(self, hpa_detail_service=None):
+        self.hpa_detail = hpa_detail_service
+    
+    def recommend_housekeeping_genes(self, 
+                                     target_localization='unknown',
+                                     tissue_type=None,
+                                     cell_line=None):
+        """
+        根据目标蛋白定位推荐内参基因
+        
+        Args:
+            target_localization: 目标蛋白定位 
+                ('cytoplasm', 'nucleus', 'membrane', 'mitochondria', 
+                 'nuclear_cytoplasmic', 'unknown')
+            tissue_type: 组织类型（如 'liver', 'brain', 'kidney'）
+            cell_line: 细胞系名称（如 'HeLa', 'HEK293'）
+            
+        Returns:
+            包含推荐内参及其HPA表达量的字典
+        """
+        recommendations = {
+            'target_localization': target_localization,
+            'primary_recommendations': [],
+            'secondary_recommendations': [],
+            'fractionation_controls': None,
+            'explanation': '',
+            'expression_data': {}
+        }
+        
+        # 根据定位选择内参策略
+        if target_localization == 'nucleus':
+            recommendations['primary_recommendations'] = ['TBP', 'RPLP0']
+            recommendations['secondary_recommendations'] = ['HMBS', 'PPIA']
+            recommendations['fractionation_controls'] = {
+                'cytoplasmic': ['GAPDH'],
+                'nuclear': ['LMNB1']
+            }
+            recommendations['explanation'] = (
+                '核蛋白研究推荐核内参（TBP、RPLP0）。'
+                '建议同时检测胞质内参GAPDH作为对照，'
+                '必要时进行核质分离并用LMNB1验证核组分纯度。'
+            )
+            
+        elif target_localization == 'cytoplasm':
+            recommendations['primary_recommendations'] = ['PPIA', 'GAPDH']
+            recommendations['secondary_recommendations'] = ['ACTB', 'HPRT1']
+            recommendations['explanation'] = (
+                '胞质蛋白推荐使用PPIA（更稳定）或GAPDH（表达高）。'
+                '若研究涉及细胞骨架或形态变化，建议加测ACTB作为对照。'
+            )
+            
+        elif target_localization == 'membrane':
+            recommendations['primary_recommendations'] = ['ATP1A1', 'GAPDH']
+            recommendations['secondary_recommendations'] = ['PPIA', 'TFRC']
+            recommendations['explanation'] = (
+                '膜蛋白研究推荐膜内参ATP1A1（Na+/K+泵）配合胞质内参GAPDH。'
+                '若细胞处于增殖状态，TFRC也可作为膜蛋白参考。'
+            )
+            
+        elif target_localization == 'mitochondria':
+            recommendations['primary_recommendations'] = ['MT-CO1', 'SDHA']
+            recommendations['secondary_recommendations'] = ['GAPDH']
+            recommendations['explanation'] = (
+                '线粒体蛋白推荐使用线粒体内参（MT-CO1或SDHA）'
+                '配合胞质内参GAPDH作为归一化对照。'
+                '注意：线粒体功能障碍时MT-CO1可能变化。'
+            )
+            
+        elif target_localization == 'nuclear_cytoplasmic':
+            recommendations['primary_recommendations'] = ['TBP', 'GAPDH']
+            recommendations['secondary_recommendations'] = ['PPIA', 'RPLP0']
+            recommendations['fractionation_controls'] = {
+                'cytoplasmic': ['GAPDH', 'ACTB'],
+                'nuclear': ['TBP', 'LMNB1'],
+                'nuclear_rna': ['MALAT1']
+            }
+            recommendations['explanation'] = (
+                '核质穿梭蛋白建议进行核质分离实验。'
+                '核组分用TBP归一化，胞质组分用GAPDH归一化。'
+                '使用LMNB1（核）和ACTB（胞质）验证分离纯度。'
+            )
+            
+        else:  # unknown or general
+            recommendations['primary_recommendations'] = ['PPIA', 'GAPDH', 'ACTB']
+            recommendations['secondary_recommendations'] = ['HPRT1', 'TBP']
+            recommendations['explanation'] = (
+                '未指定蛋白定位时，推荐使用通用胞质内参。'
+                'PPIA稳定性较好，GAPDH表达量高便于检测，'
+                'ACTB适用于大多数场景。'
+            )
+            
+        # 获取HPA表达数据
+        all_genes = (recommendations['primary_recommendations'] + 
+                    recommendations['secondary_recommendations'])
+        
+        if self.hpa_detail:
+            recommendations['expression_data'] = self._get_hpa_expression_data(
+                all_genes, tissue_type=tissue_type, cell_line=cell_line
+            )
+        else:
+            # 使用预设的典型值
+            recommendations['expression_data'] = self._get_typical_expression_data(
+                all_genes, tissue_type=tissue_type
+            )
+            
+        return recommendations
+    
+    def _get_hpa_expression_data(self, gene_list, 
+                                 tissue_type=None,
+                                 cell_line=None):
+        """从HPA获取指定基因的表达数据"""
+        expression_data = {}
+        
+        for gene_symbol in gene_list:
+            try:
+                # 获取基因详情
+                gene_data = self.hpa_detail.get_gene_details(gene_symbol)
+                
+                if not gene_data or 'error' in gene_data:
+                    # 使用预设值
+                    expression_data[gene_symbol] = self._get_gene_preset_data(gene_symbol)
+                    continue
+                
+                # 提取表达信息
+                rna_info = gene_data.get('rna_expression', {})
+                tissue_data = gene_data.get('rna_distribution', {}).get('tissue', {})
+                
+                # 获取nTPM值
+                ntpm_value = None
+                if tissue_type:
+                    hpa_tissue = self.TISSUE_MAP.get(tissue_type.lower(), tissue_type)
+                    # 注意：这里简化处理，实际应从HPA的详细组织数据中提取
+                    ntpm_value = self._extract_tissue_ntpm(gene_data, hpa_tissue)
+                
+                if ntpm_value is None:
+                    ntpm_value = tissue_data.get('specific_ntpm', 'N/A')
+                
+                expression_data[gene_symbol] = {
+                    'gene_id': gene_data.get('ensembl_id', ''),
+                    'localization': gene_data.get('protein_localization', {}).get('subcellular_main', ''),
+                    'nTPM': ntpm_value if ntpm_value != 'N/A' else self._get_typical_ntpm(gene_symbol),
+                    'expression_level': self._classify_expression(ntpm_value),
+                    'tissue_specificity': rna_info.get('tissue_specificity', ''),
+                    'hpa_url': gene_data.get('antibody', {}).get('hpa_gene_url', ''),
+                    'data_source': 'HPA'
+                }
+                
+            except Exception as e:
+                logger.warning(f"获取{gene_symbol}的HPA数据失败: {e}")
+                expression_data[gene_symbol] = self._get_gene_preset_data(gene_symbol)
+                
+        return expression_data
+    
+    def _get_typical_expression_data(self, gene_list, 
+                                     tissue_type=None):
+        """使用预设的典型表达值"""
+        expression_data = {}
+        for gene_symbol in gene_list:
+            expression_data[gene_symbol] = self._get_gene_preset_data(gene_symbol)
+        return expression_data
+    
+    def _get_gene_preset_data(self, gene_symbol):
+        """获取基因的预设数据"""
+        # 在所有分类中查找基因
+        for category, genes in self.HK_GENES.items():
+            if gene_symbol in genes:
+                info = genes[gene_symbol]
+                typical_range = info.get('typical_ntpm', '100-1000')
+                # 解析范围取中值
+                try:
+                    if '-' in typical_range:
+                        low, high = map(int, typical_range.split('-'))
+                        typical_value = (low + high) // 2
+                    else:
+                        typical_value = int(typical_range)
+                except:
+                    typical_value = typical_range
+                    
+                return {
+                    'gene_id': info.get('gene_id', ''),
+                    'localization': info.get('localization', ''),
+                    'nTPM': typical_value,
+                    'expression_level': self._classify_expression(typical_value),
+                    'pros': info.get('pros', []),
+                    'cons': info.get('cons', []),
+                    'hpa_url': info.get('hpa_url', ''),
+                    'data_source': 'preset'
+                }
+        
+        # 默认返回
+        return {
+            'gene_id': '',
+            'localization': 'unknown',
+            'nTPM': 'N/A',
+            'expression_level': 'unknown',
+            'hpa_url': f"https://www.proteinatlas.org/search/{gene_symbol}",
+            'data_source': 'unknown'
+        }
+    
+    def _get_typical_ntpm(self, gene_symbol):
+        """获取基因的典型nTPM值"""
+        preset = self._get_gene_preset_data(gene_symbol)
+        ntpm = preset.get('nTPM', 500)
+        return ntpm if isinstance(ntpm, (int, float)) else 500
+    
+    def _extract_tissue_ntpm(self, gene_data, tissue):
+        """从基因数据中提取特定组织的nTPM（简化实现）"""
+        # 实际实现应从HPA的详细组织表达数据中提取
+        # 这里使用tissue_specific_ntpm作为近似
+        ntpm_str = gene_data.get('rna_expression', {}).get('tissue_specific_ntpm', '')
+        if ntpm_str:
+            try:
+                # 尝试解析数值
+                return float(ntpm_str)
+            except:
+                pass
+        return None
+    
+    def _classify_expression(self, ntpm):
+        """根据nTPM值分级表达水平"""
+        if ntpm is None or ntpm == 'N/A':
+            return 'unknown'
+        try:
+            ntpm_val = float(ntpm)
+            if ntpm_val < 1:
+                return 'not detected'
+            elif ntpm_val < 10:
+                return 'low'
+            elif ntpm_val < 100:
+                return 'medium'
+            else:
+                return 'high'
+        except:
+            return 'unknown'
+    
+    def get_fractionation_guide(self):
+        """获取核质分离实验的对照指南"""
+        return {
+            'rna_fractionation': {
+                'cytoplasmic_marker': {
+                    'gene': 'GAPDH',
+                    'expected_ratio': '>90% in cytoplasm',
+                    'note': '若核组分中GAPDH >10%，说明分离不纯'
+                },
+                'nuclear_marker': {
+                    'gene': 'MALAT1',
+                    'expected_ratio': '>90% in nucleus',
+                    'note': '核滞留lncRNA，理想的核内对照'
+                },
+                'alternative_nuclear': {
+                    'gene': 'U1 snRNA',
+                    'note': '剪接体组分，核内丰富'
+                }
+            },
+            'protein_fractionation': {
+                'cytoplasmic_marker': {
+                    'gene': 'TUBA1A (α-tubulin)',
+                    'note': '细胞骨架蛋白，胞质丰富'
+                },
+                'nuclear_marker': {
+                    'gene': 'LMNB1 (Lamin B1)',
+                    'note': '核纤层蛋白，核膜/核内'
+                },
+                'chromatin_marker': {
+                    'gene': 'HIST1H3A (H3)',
+                    'note': '组蛋白H3，染色质结合'
+                }
+            },
+            'interpretation_guide': {
+                'pure_cytoplasmic': 'Cyto-marker >90%, Nuc-marker <5%',
+                'pure_nuclear': 'Nuc-marker >90%, Cyto-marker <5%',
+                'nuclear_cytoplasmic_shuttle': 'Both markers >20%',
+                'contaminated': 'Unexpected marker enrichment'
+            }
+        }
+    
+    def compare_expression_ratio(self, 
+                                  target_gene, 
+                                  hk_gene,
+                                  target_ntpm,
+                                  hk_ntpm):
+        """
+        计算目标基因与内参的表达比例
+        
+        Returns:
+            包含相对表达水平和实验建议的字典
+        """
+        if not isinstance(target_ntpm, (int, float)) or not isinstance(hk_ntpm, (int, float)):
+            return {'error': '无效的nTPM值'}
+        
+        if hk_ntpm == 0:
+            return {'error': '内参nTPM为0，无法计算'}
+        
+        ratio = target_ntpm / hk_ntpm
+        
+        if ratio > 0.5:
+            level = '极高表达'
+            suggestion = '检测容易，qPCR Ct值接近内参'
+        elif ratio > 0.1:
+            level = '高表达'
+            suggestion = '容易检测，无需过度循环'
+        elif ratio > 0.01:
+            level = '中等表达'
+            suggestion = '正常检测，可能需要25-30个循环'
+        elif ratio > 0.001:
+            level = '低表达'
+            suggestion = '接近qPCR灵敏度边界，建议增加cDNA投入量'
+        else:
+            level = '极低表达'
+            suggestion = '检测困难，建议考虑数字PCR或RNA-seq'
+        
+        return {
+            'target_gene': target_gene,
+            'hk_gene': hk_gene,
+            'target_ntpm': target_ntpm,
+            'hk_ntpm': hk_ntpm,
+            'ratio': round(ratio, 4),
+            'percentage': f"{ratio*100:.2f}%",
+            'relative_level': level,
+            'suggestion': suggestion
+        }
+
+
 class APIConfig:
     @staticmethod
     def get_ncbi_credentials():
@@ -4504,6 +4975,7 @@ class GeneInputComponent:
 class ReportExporter:
     @staticmethod
     def generate_html_report(result: Dict) -> str:
+        """生成完整HTML报告"""
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -4545,6 +5017,7 @@ class ReportExporter:
 
     @staticmethod
     def generate_csv_report(result: Dict) -> str:
+        """生成CSV报告"""
         try:
             df = pd.DataFrame([{
                 '基因': result.get('gene', ''),
@@ -4558,6 +5031,162 @@ class ReportExporter:
             return df.to_csv(index=False)
         except Exception as e:
             return f"Error generating CSV: {str(e)}"
+    
+    @staticmethod
+    def generate_hpa_and_function_report(result: Dict) -> str:
+        """
+        生成仅包含HPA基因信息和基因功能分析的HTML报告
+        用于在新标签页中打开查看
+        """
+        import html as html_module
+        
+        gene = result.get('gene', 'N/A')
+        timestamp = result.get('timestamp', 'N/A')
+        
+        # 获取HPA基因信息
+        hpa_data = result.get('hpa_gene_details', {})
+        
+        # 获取基因功能分析
+        func_analysis = result.get('gene_function_analysis', {})
+        func_data = func_analysis.get('data', {}) if isinstance(func_analysis, dict) else {}
+        
+        # 构建HPA信息HTML
+        hpa_html = ""
+        if hpa_data and isinstance(hpa_data, dict) and 'error' not in hpa_data:
+            # 基础信息
+            ensembl_id = hpa_data.get('ensembl_id', 'N/A')
+            uniprot_id = hpa_data.get('uniprot_id', 'N/A')
+            genome_loc = hpa_data.get('genome_location', 'N/A')
+            
+            # 蛋白定位
+            loc = hpa_data.get('protein_localization', {})
+            loc_parts = []
+            if loc.get('subcellular_main'):
+                loc_parts.append(f"<strong>主要定位:</strong> {loc['subcellular_main']}")
+            if loc.get('subcellular_additional'):
+                loc_parts.append(f"<strong>附加定位:</strong> {loc['subcellular_additional']}")
+            
+            # RNA表达
+            rna = hpa_data.get('rna_expression', {})
+            rna_parts = []
+            if rna.get('tissue_specificity'):
+                rna_parts.append(f"<strong>组织特异性:</strong> {rna['tissue_specificity']}")
+            if rna.get('tissue_specific_ntpm'):
+                rna_parts.append(f"<strong>组织nTPM:</strong> {rna['tissue_specific_ntpm']}")
+            
+            # 抗体
+            antibody = hpa_data.get('antibody', {})
+            antibody_name = antibody.get('name', 'N/A')
+            
+            hpa_html = f"""
+            <div class="section">
+                <h2>🧬 HPA基因信息</h2>
+                <table>
+                    <tr><th>信息项</th><th>内容</th></tr>
+                    <tr><td>Ensembl ID</td><td>{ensembl_id}</td></tr>
+                    <tr><td>Uniprot ID</td><td>{uniprot_id}</td></tr>
+                    <tr><td>基因组位置</td><td>{genome_loc}</td></tr>
+                    <tr><td>亚细胞定位</td><td>{'<br>'.join(loc_parts) if loc_parts else 'N/A'}</td></tr>
+                    <tr><td>RNA表达</td><td>{'<br>'.join(rna_parts) if rna_parts else 'N/A'}</td></tr>
+                    <tr><td>推荐抗体</td><td>{antibody_name}</td></tr>
+                </table>
+            </div>
+            """
+        else:
+            hpa_html = """
+            <div class="section">
+                <h2>🧬 HPA基因信息</h2>
+                <p class="warning">未获取到HPA基因信息</p>
+            </div>
+            """
+        
+        # 构建基因功能分析HTML
+        func_html = ""
+        if func_data and isinstance(func_data, dict) and not func_data.get('error'):
+            # 功能类别
+            categories = func_data.get('functional_categories', [])
+            categories_str = ', '.join(categories) if categories else 'N/A'
+            
+            # 功能总结
+            summary = func_data.get('functional_summary', 'N/A')
+            
+            # 关键通路
+            pathways = func_data.get('key_pathways', [])
+            pathways_html = '<ul>' + ''.join([f'<li>{html_module.escape(str(p))}</li>' for p in pathways]) + '</ul>' if pathways else '<p>N/A</p>'
+            
+            # 关键文献
+            refs = func_data.get('key_references', [])
+            refs_html = '<ol>' + ''.join([f'<li>{html_module.escape(str(r))}</li>' for r in refs[:5]]) + '</ol>' if refs else '<p>N/A</p>'
+            
+            func_html = f"""
+            <div class="section">
+                <h2>🔬 基因功能分析</h2>
+                <p><strong>功能类别:</strong> {html_module.escape(categories_str)}</p>
+                <p><strong>功能总结:</strong></p>
+                <p>{html_module.escape(summary)}</p>
+                <p><strong>关键通路:</strong></p>
+                {pathways_html}
+                <p><strong>关键文献:</strong></p>
+                {refs_html}
+            </div>
+            """
+        else:
+            error_msg = func_data.get('error', '未获取到基因功能分析') if isinstance(func_data, dict) else '未获取到基因功能分析'
+            func_html = f"""
+            <div class="section">
+                <h2>🔬 基因功能分析</h2>
+                <p class="warning">{html_module.escape(error_msg)}</p>
+            </div>
+            """
+        
+        # 完整HTML
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>{gene} - HPA基因信息与功能分析报告</title>
+            <style>
+                body {{ font-family: "Segoe UI", Arial, sans-serif; margin: 40px; line-height: 1.6; background-color: #f5f5f5; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px; margin-bottom: 30px; }}
+                .header h1 {{ margin: 0; font-size: 28px; }}
+                .header p {{ margin: 10px 0 0 0; opacity: 0.9; }}
+                .section {{ margin: 20px 0; padding: 25px; background: white; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                .section h2 {{ color: #333; border-bottom: 2px solid #667eea; padding-bottom: 10px; margin-top: 0; }}
+                table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
+                th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #e0e0e0; }}
+                th {{ background-color: #f8f9fa; font-weight: 600; color: #555; width: 30%; }}
+                tr:hover {{ background-color: #f8f9fa; }}
+                .pass {{ color: #28a745; }}
+                .fail {{ color: #dc3545; }}
+                .warning {{ color: #ffc107; }}
+                ul, ol {{ margin: 10px 0; padding-left: 20px; }}
+                li {{ margin: 5px 0; }}
+                .print-btn {{ position: fixed; top: 20px; right: 20px; padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }}
+                .print-btn:hover {{ background: #5a6fd6; }}
+                @media print {{ .print-btn {{ display: none; }} body {{ margin: 0; }} }}
+            </style>
+        </head>
+        <body>
+            <button class="print-btn" onclick="window.print()">🖨️ 打印/保存PDF</button>
+            
+            <div class="header">
+                <h1>🧬 {html_module.escape(gene)} 基因信息与功能分析报告</h1>
+                <p>生成时间: {timestamp}</p>
+            </div>
+            
+            {hpa_html}
+            
+            {func_html}
+            
+            <div style="text-align: center; margin-top: 40px; padding: 20px; color: #666; font-size: 12px;">
+                <p>报告由 慢病毒包装可行性评估系统 自动生成</p>
+                <p>数据来源: Human Protein Atlas (HPA) | AI功能分析</p>
+            </div>
+        </body>
+        </html>
+        """
+        return html_content
 
 # ==================== 四步法序列设计模块（用户定义版）====================
 class FourStepSequenceDesign:
@@ -6036,7 +6665,7 @@ def render_results(result: Dict):
         exporter = ReportExporter()
         html_report = exporter.generate_html_report(result)
         st.download_button(
-            "导出HTML报告",
+            "导出完整HTML报告",
             html_report,
             file_name=f"assessment_{result['gene']}_{datetime.now().strftime('%Y%m%d')}.html",
             mime="text/html"
@@ -6044,18 +6673,17 @@ def render_results(result: Dict):
     with col_exp2:
         csv_report = exporter.generate_csv_report(result)
         st.download_button(
-            "导出CSV报告",
+            "导出CSV数据",
             csv_report,
             file_name=f"assessment_{result['gene']}_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
     with col_exp3:
-        # PDF导出 - 在新标签页打开
-        pdf_html = exporter.generate_html_report(result)  # 先用HTML作为基础
-        # 使用JavaScript在新标签页打开
-        b64_pdf = base64.b64encode(pdf_html.encode()).decode()
-        pdf_link = f'<a href="data:text/html;base64,{b64_pdf}" target="_blank" style="text-decoration:none;"><button style="width:100%;padding:8px 16px;background-color:#f0f2f6;border:1px solid #ddd;border-radius:4px;cursor:pointer;">在新标签页查看报告</button></a>'
-        st.markdown(pdf_link, unsafe_allow_html=True)
+        # HPA基因信息和基因功能分析导出 - 在新标签页打开
+        hpa_func_html = exporter.generate_hpa_and_function_report(result)
+        b64_hpa = base64.b64encode(hpa_func_html.encode()).decode()
+        hpa_link = f'<a href="data:text/html;base64,{b64_hpa}" target="_blank" style="text-decoration:none;"><button style="width:100%;padding:8px 16px;background:linear-gradient(135deg, #667eea 0%, #764ba2 100%);color:white;border:none;border-radius:4px;cursor:pointer;font-weight:500;">📄 导出HPA与功能分析 (新标签页)</button></a>'
+        st.markdown(hpa_link, unsafe_allow_html=True)
 
     rec = result['final_recommendation']
     rec_color = {"BLOCKED": "#ffebee", "警告": "#fff3e0", "未检测": "#fff8e1", "未": "#e8f5e9"}.get(rec[:2], "#f5f5f5")
@@ -6489,6 +7117,140 @@ def render_results(result: Dict):
                     
                     for interp in interpretations:
                         st.markdown(f"- {interp}")
+                    
+                    # ========== 智能内参基因推荐（基于蛋白定位）==========
+                    st.divider()
+                    st.subheader("🧬 内参基因推荐")
+                    
+                    # 根据HPA蛋白定位自动推断定位类型
+                    subcell_loc = loc.get('subcellular_main', '').lower()
+                    
+                    # 映射HPA定位到内参选择器的定位类型
+                    localization_map = {
+                        'nucleus': ['nucleus', 'nucleoli', 'nucleoplasm', 'nuclear', 'chromosomes'],
+                        'cytoplasm': ['cytoplasm', 'cytosol', 'cytoskeleton', 'microtubules', 'actin filaments'],
+                        'membrane': ['plasma membrane', 'membrane', 'cell membrane', 'extracellular'],
+                        'mitochondria': ['mitochondria', 'mitochondrial', 'mitochondrion'],
+                        'nuclear_cytoplasmic': ['nucleus, cytoplasm', 'cytoplasm, nucleus', 'nuclear membrane', 'nuclear speckles']
+                    }
+                    
+                    detected_localization = 'unknown'
+                    for loc_type, keywords in localization_map.items():
+                        if any(kw in subcell_loc for kw in keywords):
+                            detected_localization = loc_type
+                            break
+                    
+                    # 初始化内参选择器并获取推荐
+                    try:
+                        hk_selector = HousekeepingGeneSelector(hpa_detail)
+                        
+                        # 获取细胞系信息（如果有）
+                        cell_line_for_hk = None
+                        if cell_line and cell_line != 'Unknown':
+                            cell_line_for_hk = cell_line
+                        
+                        hk_recommendations = hk_selector.recommend_housekeeping_genes(
+                            target_localization=detected_localization,
+                            tissue_type=None,  # 可以后续添加组织类型支持
+                            cell_line=cell_line_for_hk
+                        )
+                        
+                        # 显示定位推断
+                        loc_display = {
+                            'nucleus': '细胞核',
+                            'cytoplasm': '细胞质',
+                            'membrane': '细胞膜',
+                            'mitochondria': '线粒体',
+                            'nuclear_cytoplasmic': '核质穿梭',
+                            'unknown': '未明确（将使用通用推荐）'
+                        }
+                        
+                        st.markdown(f"**📍 蛋白定位分析:** 该基因主要定位于 **{loc_display.get(detected_localization, detected_localization)}**")
+                        if subcell_loc:
+                            st.markdown(f"*HPA注释: {loc.get('subcellular_main', 'N/A')}*")
+                        
+                        st.markdown("**💡 推荐策略:**")
+                        st.info(hk_recommendations.get('explanation', '基于蛋白定位推荐合适内参'))
+                        
+                        # 显示主要推荐
+                        if hk_recommendations.get('primary_recommendations'):
+                            st.markdown("**⭐ 主要推荐（优先选择）:**")
+                            primary_data = []
+                            for gene in hk_recommendations['primary_recommendations']:
+                                expr_data = hk_recommendations.get('expression_data', {}).get(gene, {})
+                                ntpm = expr_data.get('nTPM', 'N/A')
+                                expr_level = expr_data.get('expression_level', 'unknown')
+                                
+                                # 表达水平 emoji
+                                level_emoji = {
+                                    'high': '🔴 高',
+                                    'medium': '🟡 中',
+                                    'low': '🟢 低',
+                                    'not detected': '⚪ 未检测',
+                                    'unknown': '❓ 未知'
+                                }
+                                
+                                primary_data.append({
+                                    '基因': gene,
+                                    'nTPM': ntpm,
+                                    '表达水平': level_emoji.get(expr_level, expr_level),
+                                    '定位': expr_data.get('localization', 'N/A')[:30] + '...' if len(expr_data.get('localization', '')) > 30 else expr_data.get('localization', 'N/A')
+                                })
+                            
+                            if primary_data:
+                                st.table(pd.DataFrame(primary_data))
+                        
+                        # 显示次要推荐
+                        if hk_recommendations.get('secondary_recommendations'):
+                            with st.expander("📋 次要推荐（备选）"):
+                                secondary_data = []
+                                for gene in hk_recommendations['secondary_recommendations']:
+                                    expr_data = hk_recommendations.get('expression_data', {}).get(gene, {})
+                                    secondary_data.append({
+                                        '基因': gene,
+                                        'nTPM': expr_data.get('nTPM', 'N/A'),
+                                        '表达水平': expr_data.get('expression_level', 'unknown'),
+                                        '特点': '; '.join(expr_data.get('pros', []))[:50] + '...' if len('; '.join(expr_data.get('pros', []))) > 50 else '; '.join(expr_data.get('pros', []))
+                                    })
+                                if secondary_data:
+                                    st.table(pd.DataFrame(secondary_data))
+                        
+                        # 显示核质分离对照（如果需要）
+                        if hk_recommendations.get('fractionation_controls'):
+                            with st.expander("🔬 核质分离实验对照建议"):
+                                frac = hk_recommendations['fractionation_controls']
+                                st.markdown("**胞质组分对照:** " + ', '.join(frac.get('cytoplasmic', [])))
+                                st.markdown("**核组分对照:** " + ', '.join(frac.get('nuclear', [])))
+                                if frac.get('nuclear_rna'):
+                                    st.markdown("**核RNA对照:** " + ', '.join(frac['nuclear_rna']))
+                                st.markdown("---")
+                                st.markdown("*纯度判断: 胞质组分中GAPDH应>90%，核组分中TBP应>90%*")
+                        
+                        # 显示优缺点
+                        with st.expander("📖 内参基因详细信息"):
+                            for gene in hk_recommendations['primary_recommendations']:
+                                expr_data = hk_recommendations.get('expression_data', {}).get(gene, {})
+                                if expr_data.get('pros') or expr_data.get('cons'):
+                                    st.markdown(f"**{gene}:**")
+                                    if expr_data.get('pros'):
+                                        st.markdown(f"✅ 优点: {', '.join(expr_data['pros'])}")
+                                    if expr_data.get('cons'):
+                                        st.markdown(f"⚠️ 注意: {', '.join(expr_data['cons'])}")
+                                    st.markdown("")
+                        
+                        # 添加HPA链接
+                        st.markdown("**🔗 查看HPA详情:**")
+                        hpa_links = []
+                        for gene in hk_recommendations['primary_recommendations']:
+                            expr_data = hk_recommendations.get('expression_data', {}).get(gene, {})
+                            if expr_data.get('hpa_url'):
+                                hpa_links.append(f"[{gene}]({expr_data['hpa_url']})")
+                        if hpa_links:
+                            st.markdown(" | ".join(hpa_links))
+                        
+                    except Exception as e:
+                        st.warning(f"内参推荐功能暂时不可用: {str(e)[:100]}")
+                        logger.warning(f"HousekeepingGeneSelector error: {e}")
                 else:
                     st.info("*暂无RNA表达数据*")
         else:
