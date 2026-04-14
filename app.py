@@ -5804,7 +5804,12 @@ class FourStepSequenceDesign:
     
     def _step3_search_patents(self, gene_name: str) -> Dict:
         """
-        步骤3: 检索公开专利
+        步骤3: 检索公开专利（使用国内可访问的专利数据库）
+        
+        替代Google Patents，使用：
+        - 中国国家知识产权局专利检索系统
+        - 美国专利商标局USPTO
+        - 世界知识产权组织WIPO
         """
         result = {
             'query': '',
@@ -5813,28 +5818,44 @@ class FourStepSequenceDesign:
         }
         
         try:
-            # 使用NCBI的Patent数据库搜索
-            # 注意：NCBI的专利搜索有限，这里使用Google Patents的链接
             queries = [
                 f"{gene_name} shRNA",
-                f"{gene_name} siRNA",
+                f"{gene_name} siRNA", 
                 f"{gene_name} CRISPR",
                 f"{gene_name} sgRNA"
             ]
             
             result['query'] = queries
             
-            # 构建Google Patents搜索链接
-            for query in queries:
-                encoded_query = query.replace(' ', '+')
+            # 使用国内可访问的专利数据库
+            patent_sources = [
+                {
+                    'name': '中国国家知识产权局',
+                    'base_url': 'https://pss-system.cponline.cnipa.gov.cn/conventionalSearch',
+                    'note': '国内访问最稳定'
+                },
+                {
+                    'name': '美国专利商标局USPTO',
+                    'base_url': 'https://patents.uspto.gov/?q={query}',
+                    'note': '美国专利全文检索'
+                },
+                {
+                    'name': '世界知识产权组织WIPO',
+                    'base_url': 'https://patentscope.wipo.int/search/en/result.jsf?query={query}',
+                    'note': '国际专利检索'
+                }
+            ]
+            
+            for source in patent_sources:
                 result['patents'].append({
-                    'search_url': f"https://patents.google.com/?q={encoded_query}",
-                    'query': query,
-                    'note': '点击链接查看相关专利'
+                    'name': source['name'],
+                    'search_url': source['base_url'].replace('{query}', f"{gene_name}%20RNAi"),
+                    'query': f"{gene_name} RNAi相关",
+                    'note': source['note']
                 })
             
-            result['total_found'] = len(queries)
-            result['note'] = '专利检索通过Google Patents进行，请访问上述链接查看详细结果'
+            result['total_found'] = len(patent_sources)
+            result['note'] = '专利检索通过CNIPA/USPTO/WIPO进行，无需翻墙即可访问'
             
         except Exception as e:
             result['error'] = str(e)
@@ -7966,9 +7987,11 @@ def render_results(result: Dict):
                 step3 = four_step.get('step3_patent_search', {})
                 
                 if step3.get('patents'):
-                    st.success(f"**专利检索链接 ({len(step3['patents'])}个)**")
+                    st.success(f"**专利检索链接 ({len(step3['patents'])}个来源)**")
                     for patent in step3['patents']:
-                        st.markdown(f"- **[{patent.get('query', '')}]({patent.get('search_url', '')})** - {patent.get('note', '')}")
+                        st.markdown(f"- **[{patent.get('name', '')}]({patent.get('search_url', '')})** "
+                                  f"- {patent.get('query', '')} "
+                                  f"({patent.get('note', '')})")
                 
                 if step3.get('note'):
                     st.info(f"💡 {step3['note']}")
