@@ -63,11 +63,9 @@ st.set_page_config(
 
 # ==================== AI模型配置 ====================
 AVAILABLE_AI_MODELS = {
-    'qwen-turbo': '通义千问-Turbo (快速响应)',
-    'qwen-plus': '通义千问-Plus (推荐，更好的推理能力)',
-    'qwen-max': '通义千问-Max (最强性能)'
+    'qwen3.6-plus-2026-04-02': '通义千问-Plus (可用额度)'
 }
-DEFAULT_AI_MODEL = 'qwen-plus'
+DEFAULT_AI_MODEL = 'qwen3.6-plus-2026-04-02'
 # ================================================
 
 # ==================== HPA细胞系自动补全服务（新增）====================
@@ -5204,7 +5202,8 @@ class FourStepSequenceDesign:
     def __init__(self, ncbi_client: NCBIClient):
         self.ncbi = ncbi_client
     
-    def execute(self, gene_name: str, experiment_type: str, organism: str) -> Dict:
+    def execute(self, gene_name: str, experiment_type: str, organism: str, 
+                cell_line: Optional[str] = None) -> Dict:
         """
         执行四步法序列设计
         
@@ -5212,6 +5211,7 @@ class FourStepSequenceDesign:
             gene_name: 基因名
             experiment_type: 'knockdown' 或 'knockout'
             organism: 物种（如 human, mouse）
+            cell_line: 用户输入的细胞系（可选）
         
         Returns:
             四步法结果字典
@@ -5220,10 +5220,12 @@ class FourStepSequenceDesign:
             'gene_name': gene_name,
             'experiment_type': experiment_type,
             'organism': organism,
+            'cell_line': cell_line,
             'step1_literature_search': {},
             'step2_extract_sequences': {},
             'step3_patent_search': {},
-            'step4_species_check': {}
+            'step4_species_check': {},
+            'step5_cell_line_match': {}
         }
         
         # 步骤1: 检索文献（带物种限定）
@@ -5243,6 +5245,11 @@ class FourStepSequenceDesign:
         # 步骤4: 核对物种一致性
         result['step4_species_check'] = self._step4_check_species(
             gene_name, organism, result
+        )
+        
+        # 步骤5: 细胞系匹配评估（新增）
+        result['step5_cell_line_match'] = self._step5_check_cell_line_match(
+            cell_line, result
         )
         
         return result
@@ -5405,19 +5412,23 @@ class FourStepSequenceDesign:
     def _step2_extract_sequences(self, gene_name: str, experiment_type: str, 
                                   organism: str, papers: List[Dict]) -> Dict:
         """
-        步骤2: 从PMC开放获取全文中提取明确标注的序列
+        步骤2: 从PMC开放获取全文中提取明确标注的序列及验证数据
         
-        借鉴原则（来自通用型文献sgRNA序列提取工具）：
-        - 仅从NCBI PMC开放获取全文中提取明确标注的序列
-        - 不预测、不补全、不依赖外部数据库
-        - 输出结果必须经人工对照原文/补充材料验证
+        【改进】同时提取验证数据：
+        - 验证细胞系
+        - 验证方法（qPCR/WB/NGS等）
+        - 效率数据（敲低效率%、编辑效率%）
+        
+        区分：
+        - ✅ validated: 有完整验证数据的序列
+        - ⚠️ reported: 仅提及序列，无验证数据
         """
         import re
         import xml.etree.ElementTree as ET
         
         result = {
-            'sequences_found': [],      # 提取到的序列
-            'in_methods': [],           # 在Methods中找到的文献
+            'validated_sequences': [],  # 有验证数据的序列
+            'reported_sequences': [],   # 仅提及序列，无验证数据
             'in_supplementary': [],     # 可能在补充材料中的文献
             'needs_manual_check': [],   # 需要人工查阅的文献
             'verification_note': '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'
@@ -5466,33 +5477,80 @@ class FourStepSequenceDesign:
                 logger.warning(f"无法获取 PMC{pmcid}: {e}")
                 return ""
         
-        def extract_explicit_sgrna(text: str, gene: str) -> list:
-            """保守提取：仅匹配明确声明靶向该基因且长度18-22nt的序列"""
-            matches = []
-            # 模式1：显式标注 sgRNA/guide 序列
-            pat1 = re.compile(
-                rf'(?:{re.escape(gene)}.*?)(?:sgRNA|guide\s*RNA|targeting\s*sequence|gRNA)\s*(?:is|:|=)\s*([ATGCatgc]{{18,22}})',
-                re.IGNORECASE | re.DOTALL
-            )
-            # 模式2：5'-[ATGC]20-3' 格式
-            pat2 = re.compile(r"5'\s*-?\s*([ATGCatgc]{18,22})\s*-?\s*3'", re.IGNORECASE)
-            # 模式3：表格/补充材料常见标注
-            pat3 = re.compile(
-                r'(?:SEQ\s*ID\s*NO[:.]?\s*\d+\s*[=:]?\s*)([ATGCatgc]{18,22})',
-                re.IGNORECASE
-            )
-            # 模式4：shRNA/siRNA序列
-            pat4 = re.compile(
-                rf'(?:{re.escape(gene)}.*?)(?:shRNA|siRNA|hairpin)\s*(?:target|sequence|oligo)?\s*(?::|=)\s*([ATGCatgc]{{18,25}})',
-                re.IGNORECASE | re.DOTALL
-            )
+        def extract_sequence_with_validation(text: str, gene: str) -> list:
+            """
+            提取序列及其验证数据
             
-            for pat in [pat1, pat2, pat3, pat4]:
-                for m in pat.finditer(text):
-                    seq = m.group(1).upper()
-                    if 18 <= len(seq) <= 25:
-                        matches.append(seq)
-            return list(set(matches))  # 去重
+            返回: [{sequence, rna_type, validated_in_cell_line, validation_method, 
+                   efficiency_data, confidence}, ...]
+            """
+            matches = []
+            
+            # 模式：序列+上下文（前后500字符）
+            seq_patterns = [
+                # sgRNA/guide序列
+                (rf'(?:{re.escape(gene)}.*?)(?:sgRNA|guide\s*RNA|targeting\s*sequence|gRNA|spRNA)\s*(?:is|:|=)\s*([ATGCUatgcu]{{18,22}})', 'sgRNA'),
+                # shRNA序列
+                (rf'(?:{re.escape(gene)}.*?)(?:shRNA|short\s+hairpin)\s*(?:target|sequence|oligo)?\s*(?::|=)\s*([ATGCUatgcu]{{19,25}})', 'shRNA'),
+                # siRNA序列
+                (rf'(?:{re.escape(gene)}.*?)(?:siRNA|small\s+interfering)\s*(?:target|sequence|oligo)?\s*(?::|=)\s*([ATGCUatgcu]{{19,23}})', 'siRNA'),
+                # 5'-序列-3' 格式
+                (r"5'\s*-?\s*([ATGCUatgcu]{18,25})\s*-?\s*3'", 'unknown'),
+                # SEQ ID NO格式
+                (r'(?:SEQ\s*ID\s*NO[:.]?\s*\d+\s*[=:]?\s*)([ATGCUatgcu]{18,25})', 'unknown'),
+            ]
+            
+            for pattern, rna_type_hint in seq_patterns:
+                for m in re.finditer(pattern, text, re.IGNORECASE | re.DOTALL):
+                    seq = m.group(1).upper().replace('T', 'U')  # 统一为RNA格式
+                    if 18 <= len(seq) <= 25 and len(set(seq)) >= 3:
+                        # 获取上下文（前后800字符）
+                        start = max(0, m.start() - 800)
+                        end = min(len(text), m.end() + 800)
+                        context = text[start:end]
+                        
+                        # 分析验证数据
+                        validation_info = self._analyze_validation_data(context, seq)
+                        
+                        matches.append({
+                            'sequence': seq,
+                            'rna_type': validation_info.get('rna_type', rna_type_hint),
+                            'validated_in_cell_line': validation_info.get('cell_line'),
+                            'validation_method': validation_info.get('method'),
+                            'efficiency_data': validation_info.get('efficiency'),
+                            'target_region': validation_info.get('target_region'),
+                            'confidence': validation_info.get('confidence', 'low'),
+                            'context_snippet': context[:400] if len(context) > 400 else context
+                        })
+            
+            # 去重（基于序列）
+            seen = set()
+            unique_matches = []
+            for m in matches:
+                if m['sequence'] not in seen:
+                    seen.add(m['sequence'])
+                    unique_matches.append(m)
+            
+            return unique_matches
+        
+        def categorize_sequences(seq_list: list) -> tuple:
+            """将序列分为有验证数据和无验证数据两类"""
+            validated = []
+            reported = []
+            
+            for seq_data in seq_list:
+                has_validation = (
+                    seq_data.get('validation_method') or 
+                    seq_data.get('efficiency_data') or
+                    seq_data.get('validated_in_cell_line')
+                )
+                
+                if has_validation:
+                    validated.append(seq_data)
+                else:
+                    reported.append(seq_data)
+            
+            return validated, reported
         
         try:
             logger.info(f"🔍 开始从PMC全文中提取 {gene_name} 的序列")
@@ -5562,34 +5620,35 @@ class FourStepSequenceDesign:
                         })
                         continue
                     
-                    # 提取序列
-                    seqs = extract_explicit_sgrna(full_text, gene_name)
+                    # 提取序列及验证数据
+                    seqs_with_validation = extract_sequence_with_validation(full_text, gene_name)
                     
-                    if seqs:
-                        # 提取上下文片段
-                        context = re.search(
-                            rf'.{{0,150}}(?:{re.escape(gene_name)}).{{0,150}}', 
-                            full_text, re.IGNORECASE | re.DOTALL
-                        )
-                        context_str = context.group(0).replace("\n", " ")[:300] + "..." if context else "N/A"
+                    if seqs_with_validation:
+                        # 分类序列：有验证数据 vs 仅提及
+                        validated_seqs, reported_seqs = categorize_sequences(seqs_with_validation)
                         
-                        result['sequences_found'].append({
-                            'pmid': pmid,
-                            'pmcid': f"PMC{pmcid}",
-                            'title': title,
-                            'sequences': [
-                                {
-                                    'sequence': seq,
-                                    'length': len(seq),
-                                    'match_type': 'explicit'
-                                } for seq in seqs
-                            ],
-                            'context': context_str,
-                            'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/",
-                            'verification_status': '⚠️ 未验证（必须人工对照原文Supplementary/Sequence Listing）'
-                        })
-                        result['in_methods'].append(paper)
-                        logger.info(f"✅ 从 PMC{pmcid} 提取到 {len(seqs)} 条序列")
+                        # 添加到结果
+                        if validated_seqs:
+                            result['validated_sequences'].append({
+                                'pmid': pmid,
+                                'pmcid': f"PMC{pmcid}",
+                                'title': title,
+                                'sequences': validated_seqs,
+                                'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/",
+                                'note': '✅ 提取到验证数据（需人工复核）'
+                            })
+                            logger.info(f"✅ 从 PMC{pmcid} 提取到 {len(validated_seqs)} 条有验证数据的序列")
+                        
+                        if reported_seqs:
+                            result['reported_sequences'].append({
+                                'pmid': pmid,
+                                'pmcid': f"PMC{pmcid}",
+                                'title': title,
+                                'sequences': reported_seqs,
+                                'url': f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/",
+                                'note': '⚠️ 仅提及序列，无验证数据'
+                            })
+                            logger.info(f"⚠️ 从 PMC{pmcid} 提取到 {len(reported_seqs)} 条无验证数据的序列")
                     else:
                         # 全文已获取但未找到序列，可能在补充材料中
                         result['in_supplementary'].append({
@@ -5611,18 +5670,135 @@ class FourStepSequenceDesign:
                     continue
             
             # 添加总结
+            total_validated = sum(len(item['sequences']) for item in result['validated_sequences'])
+            total_reported = sum(len(item['sequences']) for item in result['reported_sequences'])
+            
             result['summary'] = {
                 'total_papers_checked': len(papers[:MAX_PAPERS_TO_CHECK]),
-                'sequences_extracted': len(result['sequences_found']),
+                'validated_sequences': total_validated,
+                'reported_sequences': total_reported,
                 'in_supplementary': len(result['in_supplementary']),
                 'needs_manual_check': len(result['needs_manual_check'])
             }
             
-            logger.info(f"✅ 序列提取完成: {result['summary']}")
+            logger.info(f"✅ 序列提取完成: 已验证{total_validated}条, 仅提及{total_reported}条")
             
         except Exception as e:
             result['error'] = str(e)
             logger.error(f"步骤2序列提取失败: {e}")
+        
+        return result
+    
+    def _analyze_validation_data(self, context: str, sequence: str) -> Dict:
+        """
+        从上下文中分析验证数据
+        
+        提取：
+        - 验证细胞系
+        - 验证方法（qPCR/WB/NGS/FACS等）
+        - 效率数据（百分比）
+        - 靶向区域
+        """
+        import re
+        
+        result = {
+            'cell_line': None,
+            'method': None,
+            'efficiency': None,
+            'target_region': None,
+            'confidence': 'low'
+        }
+        
+        text_lower = context.lower()
+        
+        # 1. 检测验证方法
+        method_patterns = {
+            'qPCR': [r'qpcr', r'qrt-pcr', r'real-time pcr', r'realtime pcr', r'sybr green'],
+            'Western blot': [r'western blot', r'wb', r'immunoblot'],
+            'FACS': [r'flow cytometry', r'facs', r'flow cytometric'],
+            'NGS': [r'ngs', r'next-gen', r'next generation', r'amplicon sequencing'],
+            'T7E1': [r't7e1', r't7 endonuclease'],
+            'Surveyor': [r'surveyor'],
+            ' Reporter assay': [r'luciferase', r'gfp reporter', r'reporter assay']
+        }
+        
+        detected_methods = []
+        for method, patterns in method_patterns.items():
+            if any(re.search(p, text_lower) for p in patterns):
+                detected_methods.append(method)
+        
+        if detected_methods:
+            result['method'] = ' + '.join(detected_methods[:2])  # 最多显示两种方法
+        
+        # 2. 检测效率数据
+        # 模式：XX% efficiency / knockdown efficiency of XX% / reduced by XX%
+        efficiency_patterns = [
+            r'(?:efficiency|knockdown|silencing|reduction|decrease).*?(\d{1,3})\s*%',
+            r'(\d{1,3})\s*%\s*(?:efficiency|knockdown|silencing|reduction|decrease)',
+            r'reduced\s+by\s+(\d{1,3})\s*%',
+            r'knocked\s+down\s+by\s+(\d{1,3})\s*%',
+            r'~(\d{1,3})\s*%',
+            r'approximately\s+(\d{1,3})\s*%',
+            r'>\s*(\d{1,3})\s*%',
+        ]
+        
+        for pattern in efficiency_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                eff = int(match.group(1))
+                if 10 <= eff <= 100:  # 合理性检查
+                    result['efficiency'] = f"{eff}%"
+                    break
+        
+        # 3. 检测细胞系
+        # 常见细胞系列表
+        common_cell_lines = [
+            r'hela', r'hek[- ]?293[t]?', r'a549', r'hct116', r'mcf[- ]?7', r'mda[- ]?mb[- ]?231',
+            r'u2os', r'cos[- ]?7', r'cos[- ]?1', r'cho', r'k562', r'jurkat', r'thp[- ]?1',
+            r'hepg2', r'huh7', r'hct[- ]?116', r'sw480', r'ht29',
+            r'[a-z]{1,4}[- ]?\d{2,4}',  # 通用模式：如PC3, LNCaP等
+        ]
+        
+        for pattern in common_cell_lines:
+            match = re.search(rf'\b({pattern})\b', text_lower)
+            if match:
+                result['cell_line'] = match.group(1).upper()
+                break
+        
+        # 4. 检测靶向区域（如exon 3, CDS region等）
+        region_patterns = [
+            r'exon\s+(\d+)',
+            r'cds\s+region',
+            r'utr',
+            r'3\'\s*utr',
+            r'5\'\s*utr',
+            r'coding\s+sequence',
+        ]
+        
+        for pattern in region_patterns:
+            match = re.search(pattern, text_lower)
+            if match:
+                if 'exon' in pattern:
+                    result['target_region'] = f"Exon {match.group(1)}"
+                else:
+                    result['target_region'] = match.group(0)
+                break
+        
+        # 5. 计算置信度
+        confidence_score = 0
+        if result['method']:
+            confidence_score += 2
+        if result['efficiency']:
+            confidence_score += 2
+        if result['cell_line']:
+            confidence_score += 1
+        
+        if confidence_score >= 4:
+            result['confidence'] = 'high'
+        elif confidence_score >= 2:
+            result['confidence'] = 'medium'
+        else:
+            result['confidence'] = 'low'
         
         return result
     
@@ -5719,6 +5895,120 @@ class FourStepSequenceDesign:
         except Exception as e:
             result['error'] = str(e)
             logger.error(f"步骤4物种检查失败: {e}")
+        
+        return result
+    
+    def _step5_check_cell_line_match(self, target_cell_line: Optional[str], 
+                                     previous_results: Dict) -> Dict:
+        """
+        步骤5: 细胞系匹配评估（新增）
+        
+        检查提取到的序列是否在用户目标细胞系中验证过
+        """
+        result = {
+            'target_cell_line': target_cell_line,
+            'matched_sequences': [],
+            'unmatched_sequences': [],
+            'match_status': 'unknown',
+            'recommendation': ''
+        }
+        
+        if not target_cell_line or not str(target_cell_line).strip():
+            result['match_status'] = 'no_cell_line'
+            result['recommendation'] = '未输入细胞系，无法匹配验证数据'
+            return result
+        
+        try:
+            target_lower = str(target_cell_line).lower().strip()
+            
+            # 收集步骤2中的所有验证序列
+            step2 = previous_results.get('step2_extract_sequences', {})
+            all_validated = step2.get('validated_sequences', [])
+            all_reported = step2.get('reported_sequences', [])
+            
+            matched = []
+            unmatched = []
+            
+            # 处理有验证数据的序列
+            for paper in all_validated:
+                for seq_data in paper.get('sequences', []):
+                    seq_cell_line = seq_data.get('validated_in_cell_line')
+                    entry = {
+                        'sequence': seq_data.get('sequence'),
+                        'pmid': paper.get('pmid'),
+                        'title': paper.get('title'),
+                        'rna_type': seq_data.get('rna_type'),
+                        'validated_in_cell_line': seq_cell_line,
+                        'validation_method': seq_data.get('validation_method'),
+                        'efficiency_data': seq_data.get('efficiency_data'),
+                        'confidence': seq_data.get('confidence'),
+                        'url': paper.get('url')
+                    }
+                    
+                    if seq_cell_line and seq_cell_line.lower() == target_lower:
+                        matched.append(entry)
+                    else:
+                        unmatched.append(entry)
+            
+            # 处理仅提及的序列（标记为reported）
+            for paper in all_reported:
+                for seq_data in paper.get('sequences', []):
+                    entry = {
+                        'sequence': seq_data.get('sequence'),
+                        'pmid': paper.get('pmid'),
+                        'title': paper.get('title'),
+                        'rna_type': seq_data.get('rna_type'),
+                        'validated_in_cell_line': None,
+                        'validation_method': None,
+                        'efficiency_data': None,
+                        'confidence': 'low',
+                        'note': '仅文献提及，无验证数据',
+                        'url': paper.get('url')
+                    }
+                    unmatched.append(entry)
+            
+            result['matched_sequences'] = matched
+            result['unmatched_sequences'] = unmatched
+            
+            # 生成推荐
+            if matched:
+                result['match_status'] = 'matched'
+                high_conf = [m for m in matched if m.get('confidence') == 'high']
+                result['recommendation'] = (
+                    f"✅ 找到 {len(matched)} 条在 {target_cell_line} 中验证的序列"
+                    f"（高置信度 {len(high_conf)} 条）。"
+                    f"这些序列最优先推荐，但仍需人工复核原文。"
+                )
+            elif all_validated:
+                result['match_status'] = 'unmatched'
+                cell_lines = set()
+                for paper in all_validated:
+                    for seq in paper.get('sequences', []):
+                        if seq.get('validated_in_cell_line'):
+                            cell_lines.add(seq['validated_in_cell_line'])
+                
+                if cell_lines:
+                    result['recommendation'] = (
+                        f"⚠️ 未找到在 {target_cell_line} 中验证的序列。"
+                        f"文献中验证过的细胞系包括：{', '.join(sorted(cell_lines))}。"
+                        f"建议：1) 尝试使用这些细胞系中验证的序列；"
+                        f"2) 在 {target_cell_line} 中重新验证效率。"
+                    )
+                else:
+                    result['recommendation'] = (
+                        f"⚠️ 提取到序列但文献未标注验证细胞系，"
+                        f"无法确认在 {target_cell_line} 中的有效性。"
+                    )
+            else:
+                result['match_status'] = 'no_sequences'
+                result['recommendation'] = (
+                    f"❌ 未找到任何验证序列。"
+                    f"无法在 {target_cell_line} 中推荐已验证的序列。"
+                )
+            
+        except Exception as e:
+            result['error'] = str(e)
+            logger.error(f"步骤5细胞系匹配失败: {e}")
         
         return result
 
@@ -6222,12 +6512,13 @@ class HybridAssessmentEngine:
             
             # ===== 四步法序列设计（新增）=====
             try:
-                with st.spinner("正在执行四步法序列设计..."):
+                with st.spinner("正在执行四步法序列设计（带验证数据提取）..."):
                     four_step_designer = FourStepSequenceDesign(self.ncbi)
                     four_step_result = four_step_designer.execute(
                         gene_name=gene_name,
                         experiment_type=experiment_type,
-                        organism=organism
+                        organism=organism,
+                        cell_line=cell_line
                     )
                     result['four_step_design'] = four_step_result
             except Exception as e:
@@ -6384,7 +6675,7 @@ def render_main_panel():
             list(AVAILABLE_AI_MODELS.keys()),
             format_func=lambda x: AVAILABLE_AI_MODELS.get(x, x),
             index=list(AVAILABLE_AI_MODELS.keys()).index(st.session_state['selected_ai_model']),
-            help="选择用于分析的AI模型。qwen-plus推荐用于生物医学分析",
+            help="选择用于分析的AI模型。当前使用 qwen3.6-plus-2026-04-02",
             disabled=is_locked,
             key="ai_model_selector"
         )
@@ -7544,12 +7835,13 @@ def render_results(result: Dict):
         
         four_step = result.get('four_step_design', {})
         if four_step and not four_step.get('error'):
-            # 创建四步法的子标签页
+            # 创建四步法的子标签页（新增步骤5）
             step_tabs = st.tabs([
                 "① 文献检索",
                 "② 序列提取", 
                 "③ 专利检索",
-                "④ 物种核对"
+                "④ 物种核对",
+                "⑤ 细胞系匹配"
             ])
             
             # Step 1: 文献检索
@@ -7557,56 +7849,93 @@ def render_results(result: Dict):
                 st.markdown("#### 步骤1: 检索文献（带物种限定）")
                 step1 = four_step.get('step1_literature_search', {})
                 
-                if step1.get('query'):
-                    st.caption(f"**搜索策略**: `{step1['query']}`")
+                if step1.get('search_strategies'):
+                    with st.expander("查看搜索策略"):
+                        for strategy in step1['search_strategies']:
+                            st.caption(f"**{strategy['strategy']}**: 找到{strategy['found']}篇")
                 
                 if step1.get('papers'):
-                    st.success(f"**找到 {len(step1['papers'])} 篇相关文献**")
+                    st.success(f"**找到 {len(step1['papers'])} 篇相关文献**"
+                              f"（其中PMC全文 {len(step1.get('pmc_papers', []))} 篇）")
                     for i, paper in enumerate(step1['papers'], 1):
                         with st.expander(f"{i}. {paper.get('title', '')[:60]}..."):
                             st.write(f"**标题**: {paper.get('title', '')}")
                             st.write(f"**作者**: {', '.join(paper.get('authors', []))}")
                             st.write(f"**期刊**: {paper.get('journal', '')} ({paper.get('year', '')})")
                             st.markdown(f"**PubMed**: [{paper.get('pmid', '')}]({paper.get('url', '')})")
+                            if paper.get('has_pmc'):
+                                st.markdown(f"**PMC全文**: [{paper.get('pmcid', '')}]({paper.get('pmc_url', '')})")
                 elif step1.get('total_found') == 0:
                     st.warning("未找到相关文献")
                 
                 if step1.get('error'):
                     st.error(f"检索错误: {step1['error']}")
             
-            # Step 2: 序列提取
+            # Step 2: 序列提取（改进版）
             with step_tabs[1]:
-                st.markdown("#### 步骤2: 从PMC开放获取全文提取序列")
+                st.markdown("#### 步骤2: 从PMC全文提取序列及验证数据")
                 step2 = four_step.get('step2_extract_sequences', {})
                 
-                # 显示提取到的序列
-                sequences_found = step2.get('sequences_found', [])
-                if sequences_found:
-                    st.success(f"✅ 从 {len(sequences_found)} 篇PMC文献中提取到序列")
-                    st.warning(step2.get('verification_note', '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'))
+                # 显示验证提示
+                st.warning(step2.get('verification_note', '⚠️ 所有提取的序列必须人工对照原文/补充材料验证'))
+                
+                # 显示有验证数据的序列
+                validated_sequences = step2.get('validated_sequences', [])
+                if validated_sequences:
+                    total_validated = sum(len(item['sequences']) for item in validated_sequences)
+                    st.success(f"✅ 从 {len(validated_sequences)} 篇文献中提取到 {total_validated} 条**有验证数据**的序列")
                     
-                    for i, item in enumerate(sequences_found, 1):
+                    for i, item in enumerate(validated_sequences, 1):
                         with st.expander(f"📄 文献 {i}: {item.get('title', '')[:50]}..."):
                             st.write(f"**标题**: {item.get('title', '')}")
                             st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
                             st.markdown(f"**PMC全文**: [{item.get('pmcid', '')}]({item.get('url', '')})")
                             
+                            st.write("**提取到的序列及验证数据**:")
+                            for seq_data in item.get('sequences', []):
+                                seq = seq_data.get('sequence', '')
+                                rna_type = seq_data.get('rna_type', 'unknown')
+                                cell_line = seq_data.get('validated_in_cell_line', 'N/A')
+                                method = seq_data.get('validation_method', 'N/A')
+                                efficiency = seq_data.get('efficiency_data', 'N/A')
+                                confidence = seq_data.get('confidence', 'low')
+                                
+                                # 置信度标记
+                                conf_emoji = {'high': '🟢', 'medium': '🟡', 'low': '🔴'}.get(confidence, '⚪')
+                                
+                                st.code(f"{seq} ({len(seq)}nt, {rna_type})", language='text')
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.caption(f"**验证细胞系**: {cell_line}")
+                                    st.caption(f"**验证方法**: {method}")
+                                with col2:
+                                    st.caption(f"**效率数据**: {efficiency}")
+                                    st.caption(f"**置信度**: {conf_emoji} {confidence}")
+                                st.divider()
+                
+                # 显示仅提及的序列（无验证数据）
+                reported_sequences = step2.get('reported_sequences', [])
+                if reported_sequences:
+                    total_reported = sum(len(item['sequences']) for item in reported_sequences)
+                    st.info(f"⚠️ 从 {len(reported_sequences)} 篇文献中提取到 {total_reported} 条**无验证数据**的序列（仅提及）")
+                    
+                    for i, item in enumerate(reported_sequences, 1):
+                        with st.expander(f"📄 文献 {i}: {item.get('title', '')[:50]}..."):
+                            st.write(f"**标题**: {item.get('title', '')}")
+                            st.markdown(f"**PubMed**: [{item.get('pmid', '')}]({item.get('url', '')})")
+                            
                             st.write("**提取到的序列**:")
                             for seq_data in item.get('sequences', []):
                                 seq = seq_data.get('sequence', '')
-                                match_type = seq_data.get('match_type', '')
-                                length = seq_data.get('length', 0)
-                                st.code(f"{seq} ({length}nt, {match_type})", language='text')
+                                rna_type = seq_data.get('rna_type', 'unknown')
+                                st.code(f"{seq} ({len(seq)}nt, {rna_type})", language='text')
                             
-                            with st.expander("查看上下文片段"):
-                                st.text(item.get('context', 'N/A'))
-                            
-                            st.error(f"**⚠️ {item.get('verification_status', '')}**")
+                            st.caption(item.get('note', '⚠️ 仅文献提及，无验证数据'))
                 
                 # 显示可能在补充材料中的文献
                 in_supplementary = step2.get('in_supplementary', [])
                 if in_supplementary:
-                    st.info(f"📎 可能在补充材料中的文献 ({len(in_supplementary)}篇)")
+                    st.info(f"📎 序列可能在补充材料中的文献 ({len(in_supplementary)}篇)")
                     for i, item in enumerate(in_supplementary, 1):
                         with st.expander(f"{i}. {item.get('title', '')[:50]}..."):
                             st.write(f"**标题**: {item.get('title', '')}")
@@ -7627,9 +7956,9 @@ def render_results(result: Dict):
                 if step2.get('summary'):
                     summary = step2['summary']
                     st.caption(f"**统计**: 检查了{summary.get('total_papers_checked', 0)}篇文献，"
-                              f"提取到{summary.get('sequences_extracted', 0)}篇的序列，"
-                              f"{summary.get('in_supplementary', 0)}篇可能在补充材料，"
-                              f"{summary.get('needs_manual_check', 0)}篇需人工查阅")
+                              f"已验证序列{summary.get('validated_sequences', 0)}条，"
+                              f"仅提及序列{summary.get('reported_sequences', 0)}条，"
+                              f"{summary.get('in_supplementary', 0)}篇可能在补充材料")
             
             # Step 3: 专利检索
             with step_tabs[2]:
@@ -7670,6 +7999,62 @@ def render_results(result: Dict):
                 
                 if step4.get('summary'):
                     st.caption(step4['summary'])
+            
+            # Step 5: 细胞系匹配（新增）
+            with step_tabs[4]:
+                st.markdown("#### 步骤5: 细胞系匹配评估")
+                step5 = four_step.get('step5_cell_line_match', {})
+                
+                target_cell_line = step5.get('target_cell_line', 'N/A')
+                st.write(f"**目标细胞系**: {target_cell_line}")
+                
+                match_status = step5.get('match_status', 'unknown')
+                
+                if match_status == 'no_cell_line':
+                    st.info("未输入细胞系，无法进行匹配评估")
+                elif match_status == 'matched':
+                    matched = step5.get('matched_sequences', [])
+                    if matched:
+                        st.success(f"✅ 找到 {len(matched)} 条在 {target_cell_line} 中验证的序列")
+                        
+                        # 按置信度排序
+                        high_conf = [m for m in matched if m.get('confidence') == 'high']
+                        medium_conf = [m for m in matched if m.get('confidence') == 'medium']
+                        
+                        if high_conf:
+                            st.markdown("**🟢 高置信度序列（推荐优先使用）**")
+                            for i, item in enumerate(high_conf[:5], 1):
+                                with st.expander(f"{i}. {item.get('sequence', '')[:30]}..."):
+                                    st.code(item.get('sequence', ''), language='text')
+                                    st.write(f"**RNA类型**: {item.get('rna_type', 'unknown')}")
+                                    st.write(f"**验证方法**: {item.get('validation_method', 'N/A')}")
+                                    st.write(f"**效率数据**: {item.get('efficiency_data', 'N/A')}")
+                                    st.markdown(f"**文献**: [{item.get('pmid', '')}]({item.get('url', '')})")
+                        
+                        if medium_conf:
+                            st.markdown("**🟡 中置信度序列**")
+                            for item in medium_conf[:3]:
+                                st.caption(f"- {item.get('sequence', '')} ({item.get('efficiency_data', 'N/A')})")
+                    
+                    st.info(step5.get('recommendation', ''))
+                    
+                elif match_status == 'unmatched':
+                    st.warning(step5.get('recommendation', '未找到匹配细胞系的验证序列'))
+                    
+                    # 显示其他细胞系中验证的序列
+                    unmatched = step5.get('unmatched_sequences', [])
+                    if unmatched:
+                        with st.expander(f"查看在其他细胞系中验证的序列 ({len(unmatched)}条)"):
+                            for item in unmatched[:5]:
+                                cell_line = item.get('validated_in_cell_line', 'N/A')
+                                st.caption(f"- {item.get('sequence', '')[:40]}... "
+                                          f"({cell_line}, {item.get('efficiency_data', 'N/A')})")
+                
+                elif match_status == 'no_sequences':
+                    st.error(step5.get('recommendation', '未找到任何验证序列'))
+                
+                else:
+                    st.info("细胞系匹配评估数据不完整")
         else:
             st.warning("四步法设计数据不可用")
             if four_step.get('error'):
